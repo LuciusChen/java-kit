@@ -308,8 +308,10 @@ finite process."
       (display-buffer buffer)
       service)))
 
-(defun java-kit-app--stop (context kind)
-  "Stop java-kit's tracked KIND process for CONTEXT."
+(defun java-kit-app--stop (context kind &optional quiet)
+  "Stop java-kit's tracked KIND process for CONTEXT.
+
+When QUIET is non-nil, do not report that no matching process exists."
   (if-let* ((service (java-kit-app--live-service context kind))
             (process (java-kit-app--service-process service)))
       (progn
@@ -319,9 +321,11 @@ finite process."
         (java-kit-app--refresh-mode-line)
         (message "Stopped %s for %s" kind (plist-get context :name))
         t)
-    (message "No java-kit %s process is active for %s"
-             kind (plist-get context :name))
-    nil))
+    (progn
+      (unless quiet
+        (message "No java-kit %s process is active for %s"
+                 kind (plist-get context :name)))
+      nil)))
 
 (defun java-kit-app--build-arguments (context purpose)
   "Return build arguments for CONTEXT and PURPOSE."
@@ -422,7 +426,7 @@ With prefix argument DEBUG, enable JDWP on
 With prefix argument DEBUG, enable JDWP."
   (interactive "P")
   (let ((context (java-kit-project-context)))
-    (java-kit-app--stop context 'spring-boot)
+    (java-kit-app--stop context 'spring-boot t)
     (java-kit-spring-boot-run debug)))
 
 (defun java-kit-app--tomcat-home-p (directory)
@@ -612,7 +616,7 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
      :source-buffer source-buffer
      :on-success
      (lambda ()
-       (java-kit-app--stop context 'tomcat)
+       (java-kit-app--stop context 'tomcat t)
        (let ((destination (java-kit-app--deploy-war context base)))
          (message "Deployed %s" destination))
        (java-kit-app--start-tomcat
@@ -626,17 +630,11 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
 
 ;;;###autoload
 (defun java-kit-tomcat-restart (&optional debug)
-  "Restart the current module's tracked Tomcat without rebuilding.
+  "Rebuild and redeploy the current WAR, then restart Tomcat.
 
 With prefix argument DEBUG, enable JPDA."
   (interactive "P")
-  (let* ((context (java-kit-project-context))
-         (home (java-kit-app--tomcat-home context))
-         (base (java-kit-app--tomcat-base context home))
-         (source-buffer (current-buffer)))
-    (java-kit-app--stop context 'tomcat)
-    (java-kit-app--start-tomcat
-     context home base debug source-buffer)))
+  (java-kit-tomcat-deploy debug))
 
 ;;;###autoload
 (defun java-kit-app-status ()

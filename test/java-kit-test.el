@@ -616,6 +616,28 @@
                          (insert-file-contents destination)
                          (buffer-string))))))))
 
+(ert-deftest java-kit-test-tomcat-restart-rebuilds-and-redeploys ()
+  (let (deploy-debug)
+    (cl-letf (((symbol-function 'java-kit-tomcat-deploy)
+               (lambda (&optional debug)
+                 (setq deploy-debug debug))))
+      (java-kit-tomcat-restart 'debug))
+    (should (eq 'debug deploy-debug))))
+
+(ert-deftest java-kit-test-app-stop-can-silence-missing-process ()
+  (let ((context (list :name "sample"))
+        messages)
+    (cl-letf (((symbol-function 'java-kit-app--live-service)
+               (lambda (_context _kind) nil))
+              ((symbol-function 'message)
+               (lambda (format-string &rest arguments)
+                 (push (apply #'format format-string arguments) messages))))
+      (should-not (java-kit-app--stop context 'tomcat t))
+      (should-not messages)
+      (should-not (java-kit-app--stop context 'tomcat))
+      (should (equal '("No java-kit tomcat process is active for sample")
+                     messages)))))
+
 (ert-deftest java-kit-test-app-stop-only-signals-current-module-process ()
   (java-kit-test--with-temp-directory root
     (let* ((first-context
