@@ -590,7 +590,10 @@ SEEN tracks property names already visited."
               (real-java (file-truename java))
               (home (file-name-directory
                      (directory-file-name (file-name-directory real-java)))))
-    (and (java-kit--valid-java-home-p home) home)))
+    (and (not (and (eq system-type 'darwin)
+                   (equal real-java "/usr/bin/java")))
+         (java-kit--valid-java-home-p home)
+         home)))
 
 (defun java-kit--find-java-home (version)
   "Find an installed JDK home matching VERSION."

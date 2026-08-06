@@ -167,6 +167,28 @@
      (java-kit--environment-merge base '("INVALID"))
      :type 'user-error)))
 
+(ert-deftest java-kit-test-macos-path-launcher-is-not-a-jdk-home ()
+  (let ((system-type 'darwin))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_program) "/usr/bin/java"))
+              ((symbol-function 'file-truename) #'identity)
+              ((symbol-function 'java-kit--valid-java-home-p)
+               (lambda (_directory) t)))
+      (should-not (java-kit--java-home-from-path)))))
+
+(ert-deftest java-kit-test-linux-path-java-resolves-jdk-home ()
+  (java-kit-test--with-temp-directory root
+    (let* ((system-type 'gnu/linux)
+           (jdk (java-kit-test--fake-jdk
+                 (expand-file-name "java-21-openjdk" root) "21.0.4"))
+           (java (expand-file-name "bin/java" jdk)))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (_program) "/usr/bin/java"))
+                ((symbol-function 'file-truename)
+                 (lambda (_file) java)))
+        (should (equal (file-name-as-directory jdk)
+                       (java-kit--java-home-from-path)))))))
+
 (ert-deftest java-kit-test-project-jdk-override-is-separate ()
   (java-kit-test--with-temp-directory root
     (let* ((jdk (java-kit-test--fake-jdk
