@@ -55,7 +55,7 @@ The value is sent to Java Debug and also bounds Dape Hot Code Replace requests."
 (cl-defstruct (java-kit-debug--session
                (:constructor java-kit-debug--session-create))
   "State for one Java debug session started by java-kit."
-  context connection state hcr-pending hcr-in-progress resume-after-hcr)
+  connection state hcr-pending hcr-in-progress resume-after-hcr)
 
 (defvar java-kit-debug--sessions (make-hash-table :test #'equal)
   "Java debug sessions started by java-kit, keyed by build-module root.")
@@ -127,7 +127,7 @@ The value is sent to Java Debug and also bounds Dape Hot Code Replace requests."
     (setq java-kit-debug--pending-context nil)
     (let ((session
            (java-kit-debug--session-create
-            :context context :connection connection :state 'running)))
+            :connection connection :state 'running)))
       (puthash (java-kit--module-scope context)
                session java-kit-debug--sessions)
       session)))

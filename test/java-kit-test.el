@@ -692,18 +692,40 @@
        (java-kit-app--tomcat-conflict "/instances/second" 9090)))))
 
 (ert-deftest java-kit-test-tomcat-switch-stops-managed-port-owner ()
-  (let* ((context (list :name "first" :module-root "/first/"))
+  (let* ((owner-context (list :name "first" :module-root "/first/"))
+         (current-context (list :name "second" :module-root "/second/"))
          (service (java-kit-app--service-create
-                   :kind 'tomcat :context context :process 'tomcat-process
+                   :kind 'tomcat :context owner-context
+                   :process 'tomcat-process
                    :status 'running :port 8080 :base "/instances/first"))
+         callback
          stopped)
-    (cl-letf (((symbol-function 'java-kit-app--tomcat-conflict)
+    (cl-letf (((symbol-function 'java-kit-project-context)
+               (lambda (&optional _directory) current-context))
+              ((symbol-function 'java-kit-app--tomcat-home)
+               (lambda (_context) "/tomcat"))
+              ((symbol-function 'java-kit-app--tomcat-base)
+               (lambda (_context _home) "/instances/second"))
+              ((symbol-function 'java-kit-app--build-arguments)
+               (lambda (_context _purpose) '("mvn" "package")))
+              ((symbol-function 'java-kit-app--start-process)
+               (lambda (&rest arguments)
+                 (setq callback
+                       (plist-get (nthcdr 4 arguments) :on-success))))
+              ((symbol-function 'java-kit-app--tomcat-conflict)
                (lambda (_base _port) service))
               ((symbol-function 'java-kit-app--stop)
                (lambda (stopped-context kind &optional quiet)
-                 (setq stopped (list stopped-context kind quiet)))))
-      (java-kit-app--stop-tomcat-conflict "/instances/second" 8080))
-    (should (equal (list context 'tomcat t) stopped))))
+                 (push (list stopped-context kind quiet) stopped)))
+              ((symbol-function 'java-kit-app--deploy-war)
+               (lambda (_context _base) "/instances/second/webapps/app.war"))
+              ((symbol-function 'java-kit-app--start-tomcat) #'ignore))
+      (java-kit-tomcat-deploy)
+      (should callback)
+      (funcall callback))
+    (should (equal (list (list current-context 'tomcat t)
+                         (list owner-context 'tomcat t))
+                   (nreverse stopped)))))
 
 (ert-deftest java-kit-test-tomcat-deploy-selects-newest-war ()
   (java-kit-test--with-temp-directory root
@@ -738,16 +760,15 @@
            (java-kit-tomcat-instance-directory
             (expand-file-name "instances" root))
            (base (expand-file-name "sample" java-kit-tomcat-instance-directory))
-           (context (list :module-root module :build-system 'maven))
-           (war (java-kit-test--write-file
-                 (expand-file-name "sample.war" target) "new")))
+           (context (list :module-root module :build-system 'maven)))
+      (java-kit-test--write-file
+       (expand-file-name "sample.war" target) "new")
       (java-kit-test--write-file
        (expand-file-name "webapps/old/WEB-INF/web.xml" base) "old")
       (java-kit-test--write-file
        (expand-file-name "work/Catalina/localhost/old" base) "old")
       (should (equal (expand-file-name "webapps/sample.war" base)
                      (java-kit-app--deploy-war context base)))
-      (should (file-exists-p war))
       (should-not (file-exists-p (expand-file-name "webapps/old" base)))
       (should-not
        (directory-files (expand-file-name "work" base) nil
@@ -947,7 +968,6 @@
 (ert-deftest java-kit-test-hot-replace-stopped-session-uses-public-request ()
   (let* ((session
           (java-kit-debug--session-create
-           :context '(:module-root "/tmp/sample/")
            :connection 'connection :state 'stopped))
          (java-kit-hot-code-replace-mode 'manual)
          request)
@@ -963,10 +983,9 @@
     (should-not (java-kit-debug--session-hcr-in-progress session))))
 
 (ert-deftest java-kit-test-hot-replace-running-session-pauses-and-resumes ()
-  (let* ((context '(:module-root "/tmp/sample/"))
-         (session
+  (let* ((session
           (java-kit-debug--session-create
-           :context context :connection 'connection :state 'running))
+           :connection 'connection :state 'running))
          (java-kit-debug--sessions (make-hash-table :test #'equal))
          (java-kit-hot-code-replace-mode 'auto)
          requests resumed)
@@ -991,7 +1010,6 @@
 (ert-deftest java-kit-test-hot-replace-build-event-honors-auto-mode ()
   (let* ((session
           (java-kit-debug--session-create
-           :context '(:module-root "/tmp/sample/")
            :connection 'connection :state 'running))
          (java-kit-debug--sessions (make-hash-table :test #'equal))
          (java-kit-hot-code-replace-mode 'auto)
@@ -1008,7 +1026,7 @@
   (let* ((context '(:name "sample" :module-root "/tmp/sample/"))
          (session
           (java-kit-debug--session-create
-           :context context :connection 'connection :state 'stopped))
+           :connection 'connection :state 'stopped))
          called)
     (cl-letf (((symbol-function 'java-kit-debug--ensure-dape) #'ignore)
               ((symbol-function 'java-kit-project-context)

@@ -119,7 +119,7 @@ receiving the project context and returning a string or nil."
 (cl-defstruct (java-kit-app--service
                (:constructor java-kit-app--service-create))
   "State for one java-kit-managed process."
-  key kind context process status debug port debug-port source-buffer home base
+  key kind context process status debug port debug-port source-buffer base
   ready-regexp output-tail on-success)
 
 (defvar java-kit-app--services (make-hash-table :test #'equal)
@@ -287,15 +287,14 @@ receiving the project context and returning a string or nil."
 
 (cl-defun java-kit-app--start-process
     (context kind command status
-             &key ready-regexp debug port debug-port home base environment
+             &key ready-regexp debug port debug-port base environment
              source-buffer on-success)
   "Start COMMAND for CONTEXT and register it as KIND with STATUS.
 
 READY-REGEXP marks the process running.  DEBUG, PORT, and DEBUG-PORT describe
-its endpoints.  HOME and BASE identify an external server installation and
-runtime instance.  ENVIRONMENT overrides its subprocess environment,
-SOURCE-BUFFER retains editor context, and ON-SUCCESS runs after a successful
-finite process."
+its endpoints.  BASE identifies an external server runtime instance.
+ENVIRONMENT overrides its subprocess environment, SOURCE-BUFFER retains editor
+context, and ON-SUCCESS runs after a successful finite process."
   (when (java-kit-app--live-service context kind)
     (user-error "%s is already active for %s"
                 kind (plist-get context :name)))
@@ -333,7 +332,7 @@ finite process."
              :key key :kind kind :context context :process process
              :status status :debug debug :port port :debug-port debug-port
              :source-buffer (or source-buffer (current-buffer))
-             :home home :base base
+             :base base
              :ready-regexp ready-regexp :output-tail ""
              :on-success on-success))
       (puthash key service java-kit-app--services)
@@ -614,12 +613,6 @@ function can be used directly as a project-aware customization resolver."
      java-kit-app--services)
     found))
 
-(defun java-kit-app--stop-tomcat-conflict (base port)
-  "Stop a java-kit-managed Tomcat conflicting with BASE or PORT."
-  (when-let* ((conflict (java-kit-app--tomcat-conflict base port)))
-    (java-kit-app--stop
-     (java-kit-app--service-context conflict) 'tomcat t)))
-
 (defun java-kit-app--reset-managed-tomcat-deployment (base)
   "Reset deployment state when BASE is managed by java-kit."
   (when (java-kit-app--managed-tomcat-base-p base)
@@ -672,7 +665,7 @@ function can be used directly as a project-aware customization resolver."
      :debug debug
      :port java-kit-tomcat-port
      :debug-port (and debug java-kit-tomcat-debug-port)
-     :home home :base base
+     :base base
      :environment environment
      :source-buffer source-buffer)))
 
@@ -690,12 +683,15 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
      context 'tomcat-build
      (java-kit-app--build-arguments context 'tomcat)
      'building
-     :home home :base base
      :source-buffer source-buffer
      :on-success
      (lambda ()
        (java-kit-app--stop context 'tomcat t)
-       (java-kit-app--stop-tomcat-conflict base java-kit-tomcat-port)
+       (when-let* ((conflict
+                    (java-kit-app--tomcat-conflict
+                     base java-kit-tomcat-port)))
+         (java-kit-app--stop
+          (java-kit-app--service-context conflict) 'tomcat t))
        (let ((destination (java-kit-app--deploy-war context base)))
          (message "Deployed %s" destination))
        (java-kit-app--start-tomcat
