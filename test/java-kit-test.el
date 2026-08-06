@@ -74,6 +74,16 @@
      (expand-file-name "bin/javac" root) "" #o755)
     (should (java-kit--valid-java-home-p root))))
 
+(ert-deftest java-kit-test-macos-jdk-selection-matches-exact-major ()
+  (java-kit-test--with-temp-directory root
+    (let ((jdk-22 (java-kit-test--fake-jdk
+                   (expand-file-name "jdk-22" root) "22.0.1"))
+          (jdk-8 (java-kit-test--fake-jdk
+                  (expand-file-name "jdk-8" root) "1.8.0_301")))
+      (cl-letf (((symbol-function 'java-kit--macos-java-homes)
+                 (lambda () (list jdk-22 jdk-8))))
+        (should (equal jdk-8 (java-kit--macos-java-home "8")))))))
+
 (ert-deftest java-kit-test-maven-property-resolution ()
   (java-kit-test--with-temp-directory directory
     (let ((pom (java-kit-test--write-file
@@ -84,6 +94,21 @@
                  "<maven.compiler.release>${java.version}</maven.compiler.release>"
                  "</properties></project>"))))
       (should (equal "17" (java-kit--maven-java-version pom))))))
+
+(ert-deftest java-kit-test-maven-compiler-plugin-version ()
+  (java-kit-test--with-temp-directory directory
+    (let ((pom (java-kit-test--write-file
+                (expand-file-name "pom.xml" directory)
+                (concat
+                 "<project><properties><java.version>22</java.version>"
+                 "</properties><build><plugins>"
+                 "<plugin><artifactId>other-plugin</artifactId>"
+                 "<configuration><source>99</source></configuration></plugin>"
+                 "<plugin><artifactId>maven-compiler-plugin</artifactId>"
+                 "<configuration><target>1.8</target><source>1.8</source>"
+                 "</configuration></plugin>"
+                 "</plugins></build></project>"))))
+      (should (equal "8" (java-kit--maven-java-version pom))))))
 
 (ert-deftest java-kit-test-java-version-file-precedes-build-file ()
   (java-kit-test--with-temp-directory directory

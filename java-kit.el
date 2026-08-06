@@ -421,17 +421,58 @@ SEEN tracks property names already visited."
            (cons property seen))))
     value))
 
+(defun java-kit--pom-plugin-configuration (content artifact-id)
+  "Return ARTIFACT-ID's plugin configuration from Maven POM CONTENT."
+  (let ((position 0)
+        configuration)
+    (while (and (not configuration)
+                (string-match
+                 "<plugin\\(?:[[:space:]][^>]*\\)?>" content position))
+      (let* ((plugin-start (match-end 0))
+             (plugin-end
+              (string-match "</plugin[[:space:]]*>" content plugin-start)))
+        (if (not plugin-end)
+            (setq position (length content))
+          (let ((next-position (match-end 0))
+                (plugin (substring content plugin-start plugin-end)))
+            (setq position next-position)
+            (when (equal artifact-id
+                         (java-kit--pom-property plugin "artifactId"))
+              (when (string-match
+                     "<configuration\\(?:[[:space:]][^>]*\\)?>" plugin)
+                (let ((configuration-start (match-end 0)))
+                  (when-let* ((configuration-end
+                               (string-match
+                                "</configuration[[:space:]]*>"
+                                plugin configuration-start)))
+                    (setq configuration
+                          (substring plugin configuration-start
+                                     configuration-end))))))))))
+    configuration))
+
 (defun java-kit--maven-java-version (pom-file)
   "Return the declared Java version from POM-FILE."
   (when (file-readable-p pom-file)
     (with-temp-buffer
       (insert-file-contents pom-file)
       (let* ((content (buffer-string))
+             (compiler-configuration
+              (java-kit--pom-plugin-configuration
+               content "maven-compiler-plugin"))
              (value (or (java-kit--pom-property
                          content "maven.compiler.release")
-                        (java-kit--pom-property content "java.version")
                         (java-kit--pom-property
-                         content "maven.compiler.source"))))
+                         content "maven.compiler.source")
+                        (java-kit--pom-property
+                         content "maven.compiler.target")
+                        (and compiler-configuration
+                             (or (java-kit--pom-property
+                                  compiler-configuration "release")
+                                 (java-kit--pom-property
+                                  compiler-configuration "source")
+                                 (java-kit--pom-property
+                                  compiler-configuration "target")))
+                        (java-kit--pom-property content "java.version"))))
         (java-kit--extract-java-major
          (java-kit--pom-resolve-value content value))))))
 
@@ -536,12 +577,9 @@ SEEN tracks property names already visited."
 
 (defun java-kit--macos-java-home (version)
   "Return the macOS JDK home matching VERSION."
-  (let ((java-home-program "/usr/libexec/java_home"))
-    (when (file-executable-p java-home-program)
-      (with-temp-buffer
-        (when (zerop (call-process java-home-program nil t nil "-v" version))
-          (let ((home (string-trim (buffer-string))))
-            (and (java-kit--valid-java-home-p home) home)))))))
+  (seq-find (lambda (home)
+              (equal version (java-kit--java-home-major home)))
+            (java-kit--macos-java-homes)))
 
 (defun java-kit--linux-java-homes ()
   "Return valid JDK homes found under `/usr/lib/jvm'."
