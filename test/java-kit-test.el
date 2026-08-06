@@ -638,6 +638,33 @@
       (should (equal '("No java-kit tomcat process is active for sample")
                      messages)))))
 
+(ert-deftest java-kit-test-app-process-starts-in-module-root ()
+  (java-kit-test--with-temp-directory root
+    (let* ((module (file-name-as-directory (expand-file-name "app" root)))
+           (source (file-name-as-directory
+                    (expand-file-name "src/main/java/example" module)))
+           (context (list :name "sample" :module-root module))
+           (default-directory source)
+           (java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           process-directory)
+      (make-directory source t)
+      (unwind-protect
+          (cl-letf (((symbol-function 'java-kit--command-available-p)
+                     (lambda (_program) t))
+                    ((symbol-function 'make-process)
+                     (lambda (&rest _parameters)
+                       (setq process-directory default-directory)
+                       'fake-process))
+                    ((symbol-function 'java-kit-app--refresh-mode-line)
+                     #'ignore)
+                    ((symbol-function 'display-buffer) #'ignore))
+            (java-kit-app--start-process
+             context 'tomcat-build '("mvn" "package") 'building)
+            (should (equal module process-directory)))
+        (when-let* ((buffer (get-buffer "*java-kit tomcat-build:sample*")))
+          (kill-buffer buffer))))))
+
 (ert-deftest java-kit-test-app-stop-only-signals-current-module-process ()
   (java-kit-test--with-temp-directory root
     (let* ((first-context

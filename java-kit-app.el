@@ -282,19 +282,20 @@ finite process."
         (erase-buffer))
       (compilation-mode)
       (setq default-directory scope))
-    (let ((process
-           (make-process
-            :name (format "java-kit-%s-%s"
-                          kind (substring (secure-hash 'sha1 scope) 0 8))
-            :buffer buffer
-            :command command
-            :connection-type 'pipe
-            :noquery t
-            :filter (lambda (process output)
-                      (java-kit-app--process-filter service process output))
-            :sentinel (lambda (process event)
-                        (java-kit-app--process-sentinel
-                         service process event)))))
+    (let* ((default-directory scope)
+           (process
+            (make-process
+             :name (format "java-kit-%s-%s"
+                           kind (substring (secure-hash 'sha1 scope) 0 8))
+             :buffer buffer
+             :command command
+             :connection-type 'pipe
+             :noquery t
+             :filter (lambda (process output)
+                       (java-kit-app--process-filter service process output))
+             :sentinel (lambda (process event)
+                         (java-kit-app--process-sentinel
+                          service process event)))))
       (setq service
             (java-kit-app--service-create
              :key key :kind kind :context context :process process
