@@ -636,6 +636,22 @@
       (dolist (directory '("logs" "temp" "webapps" "work"))
         (should (file-directory-p (expand-file-name directory base)))))))
 
+(ert-deftest java-kit-test-tomcat-managed-base-skips-host-contexts ()
+  (java-kit-test--with-temp-directory root
+    (let* ((home (java-kit-test--fake-tomcat
+                  (expand-file-name "tomcat-home" root)))
+           (base (expand-file-name "instance" root))
+           (context (expand-file-name
+                     "conf/Catalina/localhost/system.xml" home)))
+      (java-kit-test--write-file
+       (expand-file-name "conf/server.xml" home) "server")
+      (java-kit-test--write-file context "system context")
+      (java-kit-app--prepare-managed-tomcat-base home base)
+      (should (file-exists-p (expand-file-name "conf/server.xml" base)))
+      (should-not
+       (file-exists-p
+        (expand-file-name "conf/Catalina/localhost/system.xml" base))))))
+
 (ert-deftest java-kit-test-tomcat-managed-base-requires-readable-config ()
   (java-kit-test--with-temp-directory root
     (let* ((home (java-kit-test--fake-tomcat
@@ -674,6 +690,25 @@
         (should (member "KEEP=yes" environment))
         (should-not (getenv "CATALINA_HOME"))
         (should-not (getenv "CATALINA_BASE"))))))
+
+(ert-deftest java-kit-test-tomcat-runtime-jdk-is-independent ()
+  (java-kit-test--with-temp-directory runtime-jdk
+    (java-kit-test--fake-jdk runtime-jdk "21")
+    (let ((context (list :name "legacy"))
+          (java-kit-tomcat-java-home runtime-jdk))
+      (cl-letf (((symbol-function 'java-kit-project-process-environment)
+                 (lambda (&optional _context)
+                   '("JAVA_HOME=/project/jdk8"
+                     "PATH=/project/jdk8/bin:/usr/bin"
+                     "KEEP=yes"))))
+        (let ((environment
+               (java-kit-app--tomcat-process-environment
+                context "/tomcat" "/instance" nil)))
+          (should (member (concat "JAVA_HOME=" runtime-jdk) environment))
+          (should
+           (equal (concat (expand-file-name "bin" runtime-jdk) ":/usr/bin")
+                  (java-kit--environment-value "PATH" environment)))
+          (should (member "KEEP=yes" environment)))))))
 
 (ert-deftest java-kit-test-tomcat-conflict-detects-shared-port ()
   (let* ((context (list :name "first" :module-root "/first/"))

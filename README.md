@@ -164,7 +164,7 @@ Tomcat is detected from `CATALINA_HOME`, `catalina.sh` on `PATH`, or an unambigu
         java-kit-tomcat-context-name "ROOT")
 ```
 
-By default, each build module gets an isolated writable `CATALINA_BASE` under `java-kit-tomcat-instance-directory`. java-kit copies the detected installation's `conf`, creates `logs`, `temp`, `webapps`, and `work`, then reuses that base for the module. The installed Tomcat remains the read-only `CATALINA_HOME`.
+By default, each build module gets an isolated writable `CATALINA_BASE` under `java-kit-tomcat-instance-directory`. Matching Tomcat's `makebase.sh` default, java-kit copies the detected installation's top-level `conf` files without inheriting installation-specific Host context descriptors under `conf/Catalina`, creates `logs`, `temp`, `webapps`, and `work`, then reuses that base for the module. The installed Tomcat remains the read-only `CATALINA_HOME`.
 
 For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALINA_BASE` model](https://tomcat.apache.org/tomcat-9.0-doc/introduction.html#CATALINA_HOME_and_CATALINA_BASE), the isolated default avoids requiring write access to the package-owned runtime. To opt into an existing system base explicitly:
 
@@ -173,7 +173,16 @@ For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALIN
         java-kit-tomcat-base "/var/lib/tomcat10")
 ```
 
-Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its configuration is copied from the package's `/etc/tomcat9` target into the project base. The Emacs user must be able to read that configuration. Arch normally grants this through the `tomcat9` group (`sudo usermod -aG tomcat9 "$USER"`, followed by a new login). The package-owned `/var/lib/tomcat9/webapps` is not modified by default.
+Tomcat's runtime JDK is independent from the application's compilation JDK.
+This matters for legacy applications: a Java 8 WAR can run on a Tomcat package
+whose JSP compiler requires a newer Java runtime.  Keep the project JDK at its
+declared version and configure only the container runtime:
+
+```emacs-lisp
+(setopt java-kit-tomcat-java-home "/usr/lib/jvm/java-21-openjdk")
+```
+
+Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its top-level configuration files are copied from the package's `/etc/tomcat9` target into the project base. The Emacs user must be able to read those files. Arch normally grants this through the `tomcat9` group (`sudo usermod -aG tomcat9 "$USER"`, followed by a new login). Per-Host context descriptors and the package-owned `/var/lib/tomcat9/webapps` are not copied or modified by default.
 
 Both `java-kit-tomcat-deploy` and `java-kit-tomcat-restart` build the current WAR, stop the tracked Tomcat after a successful build, reset only the managed base's deployment state, copy the configured WAR, and start the home's `catalina.sh run` as a tracked foreground process. Switching projects on the same port stops only the conflicting java-kit-managed Tomcat. The commands never use `pgrep` or kill an unrelated JVM. Set `java-kit-tomcat-base` to nil only when intentionally using `CATALINA_BASE` or the installation home directly.
 

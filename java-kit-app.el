@@ -75,6 +75,18 @@ on PATH, or an unambiguous platform-standard installation."
                  (function :tag "Resolver function"))
   :group 'java-kit)
 
+(defcustom java-kit-tomcat-java-home nil
+  "Optional JDK home used to launch Tomcat.
+
+The value may be nil, a directory, or a function receiving the project
+context and returning a directory or nil.  Nil launches Tomcat with the
+project JDK.  Set this separately when the Tomcat installation requires a
+newer runtime than the application's compilation target."
+  :type '(choice (const :tag "Use project JDK" nil)
+                 (directory :tag "Tomcat JDK home")
+                 (function :tag "Resolver function"))
+  :group 'java-kit)
+
 (defcustom java-kit-tomcat-instance-directory
   (expand-file-name "tomcat/"
                     (expand-file-name "java-kit/" user-emacs-directory))
@@ -534,11 +546,23 @@ function can be used directly as a project-aware customization resolver."
       (user-error "Tomcat catalina.sh is missing under %s" home))
     home))
 
+(defun java-kit-app--tomcat-java-home (context)
+  "Resolve and validate the optional Tomcat JDK for CONTEXT."
+  (when-let* ((home (java-kit--configured-value
+                     java-kit-tomcat-java-home context)))
+    (unless (and (stringp home) (not (string-empty-p home)))
+      (user-error "Invalid `java-kit-tomcat-java-home': %S" home))
+    (setq home (directory-file-name (expand-file-name home)))
+    (unless (java-kit--valid-java-home-p home)
+      (user-error "Tomcat JDK home is not a full JDK: %s" home))
+    home))
+
 (defun java-kit-app--prepare-managed-tomcat-base (home base)
   "Prepare java-kit's managed Tomcat BASE from installation HOME."
   (let ((source-conf (expand-file-name "conf" home))
         (target-conf (expand-file-name "conf" base))
-        (server-conf (expand-file-name "conf/server.xml" home)))
+        (server-conf (expand-file-name "conf/server.xml" home))
+        staging-conf)
     (unless (file-directory-p source-conf)
       (user-error "Tomcat conf directory is missing under %s" home))
     (unless (file-readable-p server-conf)
@@ -550,9 +574,34 @@ function can be used directly as a project-aware customization resolver."
         (progn
           (make-directory base t)
           (unless (file-exists-p (expand-file-name "server.xml" target-conf))
-            (when (file-directory-p target-conf)
-              (delete-directory target-conf t))
-            (copy-directory source-conf target-conf nil nil t))
+            ;; Match Tomcat's makebase.sh default: a fresh base inherits the
+            ;; installation's top-level configuration files, not Host-specific
+            ;; context descriptors such as conf/Catalina/localhost/*.xml.
+            ;; Assemble the configuration beside the target first so a failed
+            ;; copy cannot leave a managed base that looks complete.
+            (setq staging-conf
+                  (make-temp-file (expand-file-name ".conf-" base) t))
+            (unwind-protect
+                (progn
+                  (dolist (source
+                           (directory-files
+                            source-conf t directory-files-no-dot-files-regexp))
+                    (when (file-regular-p source)
+                      (copy-file
+                       source
+                       (expand-file-name
+                        (file-name-nondirectory source) staging-conf)
+                       nil t)))
+                  (unless (file-exists-p
+                           (expand-file-name "server.xml" staging-conf))
+                    (user-error "Tomcat server.xml could not be copied from %s"
+                                source-conf))
+                  (when (file-directory-p target-conf)
+                    (delete-directory target-conf t))
+                  (rename-file staging-conf target-conf)
+                  (setq staging-conf nil))
+              (when (and staging-conf (file-directory-p staging-conf))
+                (ignore-errors (delete-directory staging-conf t)))))
           (dolist (directory '("logs" "temp" "webapps" "work"))
             (make-directory (expand-file-name directory base) t)))
       (file-error
@@ -588,7 +637,12 @@ function can be used directly as a project-aware customization resolver."
 
 (defun java-kit-app--tomcat-process-environment (context home base debug)
   "Return the Tomcat environment for CONTEXT, HOME, BASE, and DEBUG mode."
-  (let ((environment (java-kit-project-process-environment context)))
+  (let* ((environment (java-kit-project-process-environment context))
+         (tomcat-java-home (java-kit-app--tomcat-java-home context)))
+    (when tomcat-java-home
+      (setq environment
+            (java-kit--environment-with-java-home
+             tomcat-java-home environment)))
     (setq environment
           (java-kit--environment-merge
            environment

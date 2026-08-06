@@ -713,16 +713,20 @@ project detection.  This command never changes global `JAVA_HOME' or `PATH'."
                       environment)))
     (substring entry (1+ (length name)))))
 
-(defun java-kit--environment-with-java-home (java-home)
-  "Return a process environment using JAVA-HOME."
-  (let* ((old-java-home (getenv "JAVA_HOME"))
+(defun java-kit--environment-with-java-home (java-home &optional environment)
+  "Return ENVIRONMENT adjusted to use JAVA-HOME.
+
+ENVIRONMENT defaults to `process-environment'."
+  (let* ((environment (copy-sequence (or environment process-environment)))
+         (old-java-home (java-kit--environment-value "JAVA_HOME" environment))
          (old-java-bin (and old-java-home
                             (directory-file-name
                              (expand-file-name "bin" old-java-home))))
          (java-bin (directory-file-name
                     (expand-file-name "bin" java-home)))
-         (path-parts (split-string (or (getenv "PATH") "")
-                                   path-separator t))
+         (path-parts (split-string
+                      (or (java-kit--environment-value "PATH" environment) "")
+                      path-separator t))
          (filtered-path
           (seq-remove
            (lambda (path)
@@ -730,18 +734,18 @@ project detection.  This command never changes global `JAVA_HOME' or `PATH'."
                (or (equal expanded java-bin)
                    (and old-java-bin (equal expanded old-java-bin)))))
            path-parts))
-         (environment
+         (remaining-environment
           (seq-remove
            (lambda (entry)
              (or (string-prefix-p "JAVA_HOME=" entry)
                  (string-prefix-p "PATH=" entry)))
-           process-environment)))
+           environment)))
     (cons (concat "JAVA_HOME=" java-home)
           (cons (concat "PATH="
                         (mapconcat #'identity
                                    (cons java-bin filtered-path)
                                    path-separator))
-                environment))))
+                remaining-environment))))
 
 (defun java-kit-project-process-environment (&optional context)
   "Return a process environment suitable for CONTEXT."
