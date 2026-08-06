@@ -36,7 +36,7 @@
   :type 'boolean
   :group 'java-kit)
 
-(defcustom java-kit-app-auto-debug-attach nil
+(defcustom java-kit-app-auto-debug-attach t
   "Whether a debug service should invoke Dape after it becomes ready."
   :type 'boolean
   :group 'java-kit)
@@ -75,14 +75,23 @@ on PATH, or an unambiguous platform-standard installation."
                  (function :tag "Resolver function"))
   :group 'java-kit)
 
-(defcustom java-kit-tomcat-base nil
+(defcustom java-kit-tomcat-instance-directory
+  (expand-file-name "tomcat/"
+                    (expand-file-name "java-kit/" user-emacs-directory))
+  "Directory containing project-isolated Tomcat runtime instances."
+  :type 'directory
+  :group 'java-kit)
+
+(defcustom java-kit-tomcat-base #'java-kit-tomcat-project-base
   "Tomcat runtime instance used by deployment and lifecycle commands.
 
 The value may be nil, a directory, or a function receiving the project
-context and returning a directory.  Nil uses `CATALINA_BASE' when set and
-otherwise uses `java-kit-tomcat-home'.  Set this separately for Linux package
-layouts that split executable files and writable runtime state."
-  :type '(choice (const :tag "Environment or Tomcat home" nil)
+context and returning a directory.  The default creates an isolated writable
+runtime under `java-kit-tomcat-instance-directory'.  Nil uses `CATALINA_BASE'
+when set and otherwise uses `java-kit-tomcat-home'."
+  :type '(choice (const :tag "Project-isolated base"
+                        java-kit-tomcat-project-base)
+                 (const :tag "Environment or Tomcat home" nil)
                  (directory :tag "Tomcat base")
                  (function :tag "Resolver function"))
   :group 'java-kit)
@@ -122,6 +131,29 @@ receiving the project context and returning a string or nil."
 
 (defvar java-kit-app--mode-line-entry '("" java-kit-app--mode-line)
   "Entry installed in `global-mode-string' while services are live.")
+
+(defun java-kit-app--safe-name (name)
+  "Return NAME sanitized for a generated directory component."
+  (let ((safe (replace-regexp-in-string
+               "[^[:alnum:]._-]+" "-" (or name ""))))
+    (if (string-empty-p safe) "project" safe)))
+
+(defun java-kit-tomcat-project-base (context)
+  "Return the isolated Tomcat runtime base for CONTEXT."
+  (let* ((scope (java-kit--module-scope context))
+         (name (java-kit-app--safe-name (plist-get context :name)))
+         (hash (substring (secure-hash 'sha1 scope) 0 8)))
+    (expand-file-name
+     (format "%s-%s-%d" name hash java-kit-tomcat-port)
+     java-kit-tomcat-instance-directory)))
+
+(defun java-kit-app--managed-tomcat-base-p (base)
+  "Return non-nil when BASE belongs to java-kit's instance directory."
+  (let ((instances
+         (file-name-as-directory
+          (expand-file-name java-kit-tomcat-instance-directory)))
+        (base (file-name-as-directory (expand-file-name base))))
+    (string-prefix-p instances base)))
 
 (defun java-kit-app--key (context kind)
   "Return the registry key for CONTEXT and service KIND."
@@ -503,6 +535,31 @@ function can be used directly as a project-aware customization resolver."
       (user-error "Tomcat catalina.sh is missing under %s" home))
     home))
 
+(defun java-kit-app--prepare-managed-tomcat-base (home base)
+  "Prepare java-kit's managed Tomcat BASE from installation HOME."
+  (let ((source-conf (expand-file-name "conf" home))
+        (target-conf (expand-file-name "conf" base))
+        (server-conf (expand-file-name "conf/server.xml" home)))
+    (unless (file-directory-p source-conf)
+      (user-error "Tomcat conf directory is missing under %s" home))
+    (unless (file-readable-p server-conf)
+      (user-error
+       (concat "Tomcat configuration is not readable: %s; grant this user "
+               "read access or configure a readable `java-kit-tomcat-home'")
+       server-conf))
+    (condition-case error-data
+        (progn
+          (make-directory base t)
+          (unless (file-exists-p (expand-file-name "server.xml" target-conf))
+            (when (file-directory-p target-conf)
+              (delete-directory target-conf t))
+            (copy-directory source-conf target-conf nil nil t))
+          (dolist (directory '("logs" "temp" "webapps" "work"))
+            (make-directory (expand-file-name directory base) t)))
+      (file-error
+       (user-error "Could not prepare Tomcat base %s: %s"
+                   base (error-message-string error-data))))))
+
 (defun java-kit-app--tomcat-base (context home)
   "Resolve and validate the Tomcat runtime base for CONTEXT and HOME."
   (let* ((configured
@@ -514,6 +571,8 @@ function can be used directly as a project-aware customization resolver."
                         environment-base)
                    home)))
     (setq base (directory-file-name (expand-file-name base)))
+    (when (java-kit-app--managed-tomcat-base-p base)
+      (java-kit-app--prepare-managed-tomcat-base home base))
     (unless (file-directory-p (expand-file-name "conf" base))
       (user-error "Tomcat conf directory is missing under %s" base))
     (unless (file-directory-p (expand-file-name "webapps" base))
@@ -542,17 +601,33 @@ function can be used directly as a project-aware customization resolver."
          (list (format "JPDA_ADDRESS=%d" java-kit-tomcat-debug-port)))
       environment)))
 
-(defun java-kit-app--tomcat-conflict (base)
-  "Return a live java-kit Tomcat service using BASE."
+(defun java-kit-app--tomcat-conflict (base port)
+  "Return a live java-kit Tomcat service using BASE or PORT."
   (let (found)
     (maphash
      (lambda (_key service)
        (when (and (eq (java-kit-app--service-kind service) 'tomcat)
-                  (equal base (java-kit-app--service-base service))
+                  (or (equal base (java-kit-app--service-base service))
+                      (equal port (java-kit-app--service-port service)))
                   (process-live-p (java-kit-app--service-process service)))
          (setq found service)))
      java-kit-app--services)
     found))
+
+(defun java-kit-app--stop-tomcat-conflict (base port)
+  "Stop a java-kit-managed Tomcat conflicting with BASE or PORT."
+  (when-let* ((conflict (java-kit-app--tomcat-conflict base port)))
+    (java-kit-app--stop
+     (java-kit-app--service-context conflict) 'tomcat t)))
+
+(defun java-kit-app--reset-managed-tomcat-deployment (base)
+  "Reset deployment state when BASE is managed by java-kit."
+  (when (java-kit-app--managed-tomcat-base-p base)
+    (dolist (directory '("webapps" "work"))
+      (let ((path (expand-file-name directory base)))
+        (when (file-directory-p path)
+          (delete-directory path t))
+        (make-directory path t)))))
 
 (defun java-kit-app--war (context)
   "Return the built WAR artifact for CONTEXT."
@@ -576,14 +651,16 @@ function can be used directly as a project-aware customization resolver."
             (file-name-nondirectory war)))
          (destination (expand-file-name file-name
                                         (expand-file-name "webapps" base))))
+    (java-kit-app--reset-managed-tomcat-deployment base)
     (copy-file war destination t)
     destination))
 
 (defun java-kit-app--start-tomcat (context home base debug source-buffer)
   "Start Tomcat HOME and BASE for CONTEXT in DEBUG mode from SOURCE-BUFFER."
-  (when-let* ((conflict (java-kit-app--tomcat-conflict base)))
-    (user-error "Tomcat base %s is already managed for %s"
-                base
+  (when-let* ((conflict
+               (java-kit-app--tomcat-conflict base java-kit-tomcat-port)))
+    (user-error "Tomcat base %s or port %d is already managed for %s"
+                base java-kit-tomcat-port
                 (plist-get (java-kit-app--service-context conflict) :name)))
   (let ((environment
          (java-kit-app--tomcat-process-environment
@@ -618,6 +695,7 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
      :on-success
      (lambda ()
        (java-kit-app--stop context 'tomcat t)
+       (java-kit-app--stop-tomcat-conflict base java-kit-tomcat-port)
        (let ((destination (java-kit-app--deploy-war context base)))
          (message "Deployed %s" destination))
        (java-kit-app--start-tomcat

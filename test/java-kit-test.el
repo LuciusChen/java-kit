@@ -536,6 +536,9 @@
                      (java-kit-app--build-arguments
                       context 'spring-boot))))))
 
+(ert-deftest java-kit-test-app-debug-services-auto-attach-by-default ()
+  (should java-kit-app-auto-debug-attach))
+
 (ert-deftest java-kit-test-spring-command-keeps-debug-and-project-jdk-explicit ()
   (let ((context (list :name "sample"))
         (java-kit-spring-boot-debug-port 5105)
@@ -594,10 +597,63 @@
       (should (equal home (java-kit-app--tomcat-home context)))
       (should (equal base (java-kit-app--tomcat-base context home))))))
 
+(ert-deftest java-kit-test-tomcat-project-bases-are-stable-and-isolated ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-tomcat-instance-directory
+            (expand-file-name "instances" root))
+           (java-kit-tomcat-port 8080)
+           (first (list :name "sample"
+                        :module-root (expand-file-name "first" root)))
+           (second (list :name "sample"
+                         :module-root (expand-file-name "second" root)))
+           (first-base (java-kit-tomcat-project-base first))
+           (second-base (java-kit-tomcat-project-base second)))
+      (should (string-prefix-p
+               (file-name-as-directory java-kit-tomcat-instance-directory)
+               (file-name-as-directory first-base)))
+      (should (equal first-base (java-kit-tomcat-project-base first)))
+      (should-not (equal first-base second-base)))))
+
+(ert-deftest java-kit-test-tomcat-managed-base-prepares-runtime-layout ()
+  (java-kit-test--with-temp-directory root
+    (let* ((home (java-kit-test--fake-tomcat
+                  (expand-file-name "tomcat-home" root)))
+           (java-kit-tomcat-instance-directory
+            (expand-file-name "instances" root))
+           (context (list :name "sample"
+                          :module-root (expand-file-name "project" root)))
+           (java-kit-tomcat-base #'java-kit-tomcat-project-base)
+           (server (java-kit-test--write-file
+                    (expand-file-name "conf/server.xml" home) "server"))
+           (base (java-kit-tomcat-project-base context)))
+      (should (file-readable-p server))
+      (should (equal base (java-kit-app--tomcat-base context home)))
+      (should (equal "server"
+                     (with-temp-buffer
+                       (insert-file-contents
+                        (expand-file-name "conf/server.xml" base))
+                       (buffer-string))))
+      (dolist (directory '("logs" "temp" "webapps" "work"))
+        (should (file-directory-p (expand-file-name directory base)))))))
+
+(ert-deftest java-kit-test-tomcat-managed-base-requires-readable-config ()
+  (java-kit-test--with-temp-directory root
+    (let* ((home (java-kit-test--fake-tomcat
+                  (expand-file-name "tomcat-home" root)))
+           (base (expand-file-name "instance" root))
+           (server-conf (expand-file-name "conf/server.xml" home)))
+      (java-kit-test--write-file server-conf "server")
+      (cl-letf (((symbol-function 'file-readable-p)
+                 (lambda (file) (not (equal file server-conf)))))
+        (should-error
+         (java-kit-app--prepare-managed-tomcat-base home base)
+         :type 'user-error)))))
+
 (ert-deftest java-kit-test-tomcat-base-must-be-writable ()
   (java-kit-test--with-temp-directory root
     (let* ((home (java-kit-test--fake-tomcat root))
-           (context (list :name "sample")))
+           (context (list :name "sample"))
+           (java-kit-tomcat-base home))
       (cl-letf (((symbol-function 'file-writable-p)
                  (lambda (_file) nil)))
         (should-error (java-kit-app--tomcat-base context home)
@@ -619,6 +675,36 @@
         (should-not (getenv "CATALINA_HOME"))
         (should-not (getenv "CATALINA_BASE"))))))
 
+(ert-deftest java-kit-test-tomcat-conflict-detects-shared-port ()
+  (let* ((context (list :name "first" :module-root "/first/"))
+         (key (java-kit-app--key context 'tomcat))
+         (service (java-kit-app--service-create
+                   :key key :kind 'tomcat :context context
+                   :process 'tomcat-process :status 'running
+                   :port 8080 :base "/instances/first"))
+         (java-kit-app--services (make-hash-table :test #'equal)))
+    (puthash key service java-kit-app--services)
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (process) (eq process 'tomcat-process))))
+      (should (eq service
+                  (java-kit-app--tomcat-conflict "/instances/second" 8080)))
+      (should-not
+       (java-kit-app--tomcat-conflict "/instances/second" 9090)))))
+
+(ert-deftest java-kit-test-tomcat-switch-stops-managed-port-owner ()
+  (let* ((context (list :name "first" :module-root "/first/"))
+         (service (java-kit-app--service-create
+                   :kind 'tomcat :context context :process 'tomcat-process
+                   :status 'running :port 8080 :base "/instances/first"))
+         stopped)
+    (cl-letf (((symbol-function 'java-kit-app--tomcat-conflict)
+               (lambda (_base _port) service))
+              ((symbol-function 'java-kit-app--stop)
+               (lambda (stopped-context kind &optional quiet)
+                 (setq stopped (list stopped-context kind quiet)))))
+      (java-kit-app--stop-tomcat-conflict "/instances/second" 8080))
+    (should (equal (list context 'tomcat t) stopped))))
+
 (ert-deftest java-kit-test-tomcat-deploy-selects-newest-war ()
   (java-kit-test--with-temp-directory root
     (let* ((module (file-name-as-directory (expand-file-name "app" root)))
@@ -631,6 +717,8 @@
            (context (list :module-root module :build-system 'maven))
            (java-kit-tomcat-context-name "ROOT"))
       (make-directory (expand-file-name "webapps" home) t)
+      (java-kit-test--write-file
+       (expand-file-name "webapps/keep.txt" home) "keep")
       (set-file-times old (seconds-to-time 1))
       (set-file-times new (seconds-to-time 2))
       (let ((destination (java-kit-app--deploy-war context home)))
@@ -639,7 +727,31 @@
         (should (equal "new"
                        (with-temp-buffer
                          (insert-file-contents destination)
-                         (buffer-string))))))))
+                         (buffer-string))))
+        (should (file-exists-p
+                 (expand-file-name "webapps/keep.txt" home)))))))
+
+(ert-deftest java-kit-test-tomcat-deploy-resets-managed-runtime ()
+  (java-kit-test--with-temp-directory root
+    (let* ((module (file-name-as-directory (expand-file-name "app" root)))
+           (target (expand-file-name "target" module))
+           (java-kit-tomcat-instance-directory
+            (expand-file-name "instances" root))
+           (base (expand-file-name "sample" java-kit-tomcat-instance-directory))
+           (context (list :module-root module :build-system 'maven))
+           (war (java-kit-test--write-file
+                 (expand-file-name "sample.war" target) "new")))
+      (java-kit-test--write-file
+       (expand-file-name "webapps/old/WEB-INF/web.xml" base) "old")
+      (java-kit-test--write-file
+       (expand-file-name "work/Catalina/localhost/old" base) "old")
+      (should (equal (expand-file-name "webapps/sample.war" base)
+                     (java-kit-app--deploy-war context base)))
+      (should (file-exists-p war))
+      (should-not (file-exists-p (expand-file-name "webapps/old" base)))
+      (should-not
+       (directory-files (expand-file-name "work" base) nil
+                        directory-files-no-dot-files-regexp)))))
 
 (ert-deftest java-kit-test-tomcat-restart-rebuilds-and-redeploys ()
   (let (deploy-debug)

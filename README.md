@@ -164,18 +164,20 @@ Tomcat is detected from `CATALINA_HOME`, `catalina.sh` on `PATH`, or an unambigu
         java-kit-tomcat-context-name "ROOT")
 ```
 
-For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALINA_BASE` model](https://tomcat.apache.org/tomcat-9.0-doc/introduction.html#CATALINA_HOME_and_CATALINA_BASE), configure both directories; the base must be writable by Emacs:
+By default, each build module gets an isolated writable `CATALINA_BASE` under `java-kit-tomcat-instance-directory`. java-kit copies the detected installation's `conf`, creates `logs`, `temp`, `webapps`, and `work`, then reuses that base for the module. The installed Tomcat remains the read-only `CATALINA_HOME`.
+
+For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALINA_BASE` model](https://tomcat.apache.org/tomcat-9.0-doc/introduction.html#CATALINA_HOME_and_CATALINA_BASE), the isolated default avoids requiring write access to the package-owned runtime. To opt into an existing system base explicitly:
 
 ```emacs-lisp
 (setopt java-kit-tomcat-home "/usr/share/tomcat10"
         java-kit-tomcat-base "/var/lib/tomcat10")
 ```
 
-Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its `conf` and `webapps` entries point to `/etc/tomcat9` and `/var/lib/tomcat9/webapps`. The effective `webapps` directory must be writable by the Emacs user.
+Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its configuration is copied from the package's `/etc/tomcat9` target into the project base. The Emacs user must be able to read that configuration. Arch normally grants this through the `tomcat9` group (`sudo usermod -aG tomcat9 "$USER"`, followed by a new login). The package-owned `/var/lib/tomcat9/webapps` is not modified by default.
 
-`CATALINA_BASE` is honored when `java-kit-tomcat-base` is nil; otherwise the base defaults to the detected home. Both `java-kit-tomcat-deploy` and `java-kit-tomcat-restart` build the current WAR, stop the tracked Tomcat after a successful build, replace only the configured WAR file in the base's `webapps`, and start the home's `catalina.sh run` as a tracked foreground process. They never use `pgrep` or kill an unrelated Tomcat. A single Tomcat base cannot be managed concurrently for two projects.
+Both `java-kit-tomcat-deploy` and `java-kit-tomcat-restart` build the current WAR, stop the tracked Tomcat after a successful build, reset only the managed base's deployment state, copy the configured WAR, and start the home's `catalina.sh run` as a tracked foreground process. Switching projects on the same port stops only the conflicting java-kit-managed Tomcat. The commands never use `pgrep` or kill an unrelated JVM. Set `java-kit-tomcat-base` to nil only when intentionally using `CATALINA_BASE` or the installation home directly.
 
-Use a prefix argument with Spring Boot run or Tomcat deploy/restart to enable JDWP. `java-kit-app-auto-debug-attach` can attach Dape after the readiness message; it defaults to nil. `java-kit-dape-attach` can also attach manually to any listening JDWP port through the JDTLS Java Debug adapter.
+Use a prefix argument with Spring Boot run or Tomcat deploy/restart to enable JDWP. `java-kit-app-auto-debug-attach` attaches Dape after the readiness message by default; set it to nil to opt out. `java-kit-dape-attach` can also attach manually to any listening JDWP port through the JDTLS Java Debug adapter.
 
 For Dape launch commands, the JDTLS debug-adapter transport port and the target JVM's JDWP port remain distinct. This fixes the port conflation in the old server package.
 
