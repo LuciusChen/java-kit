@@ -44,6 +44,15 @@
    (format "JAVA_VERSION=\"%s\"\n" version))
   directory)
 
+(defun java-kit-test--fake-tomcat (home &optional base)
+  "Create a fake Tomcat HOME and optional runtime BASE."
+  (java-kit-test--write-file
+   (expand-file-name "bin/catalina.sh" home) "#!/bin/sh\n" #o755)
+  (let ((base (or base home)))
+    (make-directory (expand-file-name "conf" base) t)
+    (make-directory (expand-file-name "webapps" base) t))
+  home)
+
 (defun java-kit-test--range (start-line end-line)
   "Return an LSP range from START-LINE through END-LINE."
   (list :start (list :line start-line :character 0)
@@ -515,7 +524,59 @@
           "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=5105"
           "-jar" "/tmp/app.jar" "--spring.profiles.active=dev")
         (java-kit-app--spring-command
-         context "/tmp/app.jar" t))))))
+        context "/tmp/app.jar" t))))))
+
+(ert-deftest java-kit-test-tomcat-auto-detection-uses-path-on-linux ()
+  (java-kit-test--with-temp-directory root
+    (let* ((system-type 'gnu/linux)
+           (process-environment '("PATH=/usr/bin"))
+           (home (java-kit-test--fake-tomcat
+                  (expand-file-name "apache-tomcat-10" root)))
+           (launcher (expand-file-name "bin/catalina.sh" home)))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (program)
+                   (and (equal program "catalina.sh") launcher))))
+        (should (equal home (java-kit-detect-tomcat-home)))))))
+
+(ert-deftest java-kit-test-tomcat-auto-detection-rejects-ambiguity ()
+  (let ((process-environment '("PATH=/usr/bin")))
+    (cl-letf (((symbol-function 'java-kit-app--tomcat-launcher-home)
+               (lambda () nil))
+              ((symbol-function 'java-kit-app--tomcat-installations)
+               (lambda () '("/opt/tomcat9" "/opt/tomcat10"))))
+      (should-error (java-kit-detect-tomcat-home) :type 'user-error))))
+
+(ert-deftest java-kit-test-tomcat-auto-detection-scans-arch-layout ()
+  (java-kit-test--with-temp-directory root
+    (let* ((system-type 'gnu/linux)
+           (home (java-kit-test--fake-tomcat
+                  (expand-file-name "usr/share/tomcat9" root))))
+      (cl-letf (((symbol-function 'file-expand-wildcards)
+                 (lambda (pattern &optional _full)
+                   (and (equal pattern "/usr/share/tomcat*")
+                        (list home)))))
+        (should (equal (list home)
+                       (java-kit-app--tomcat-installations)))))))
+
+(ert-deftest java-kit-test-tomcat-home-and-base-resolve-separately ()
+  (java-kit-test--with-temp-directory root
+    (let* ((home (expand-file-name "usr/share/tomcat10" root))
+           (base (expand-file-name "var/lib/tomcat10" root))
+           (context (list :name "sample"))
+           (java-kit-tomcat-home home)
+           (java-kit-tomcat-base base))
+      (java-kit-test--fake-tomcat home base)
+      (should (equal home (java-kit-app--tomcat-home context)))
+      (should (equal base (java-kit-app--tomcat-base context home))))))
+
+(ert-deftest java-kit-test-tomcat-base-must-be-writable ()
+  (java-kit-test--with-temp-directory root
+    (let* ((home (java-kit-test--fake-tomcat root))
+           (context (list :name "sample")))
+      (cl-letf (((symbol-function 'file-writable-p)
+                 (lambda (_file) nil)))
+        (should-error (java-kit-app--tomcat-base context home)
+                      :type 'user-error)))))
 
 (ert-deftest java-kit-test-tomcat-environment-is-process-local ()
   (let ((context (list :name "sample"))
@@ -525,11 +586,13 @@
                  '("PATH=/project/jdk/bin:/usr/bin" "KEEP=yes"))))
       (let ((environment
              (java-kit-app--tomcat-process-environment
-              context "/opt/tomcat" t)))
-        (should (member "CATALINA_HOME=/opt/tomcat" environment))
+              context "/usr/share/tomcat10" "/var/lib/tomcat10" t)))
+        (should (member "CATALINA_HOME=/usr/share/tomcat10" environment))
+        (should (member "CATALINA_BASE=/var/lib/tomcat10" environment))
         (should (member "JPDA_ADDRESS=8100" environment))
         (should (member "KEEP=yes" environment))
-        (should-not (getenv "CATALINA_HOME"))))))
+        (should-not (getenv "CATALINA_HOME"))
+        (should-not (getenv "CATALINA_BASE"))))))
 
 (ert-deftest java-kit-test-tomcat-deploy-selects-newest-war ()
   (java-kit-test--with-temp-directory root

@@ -157,14 +157,23 @@ The remote integrations follow the providers' documented generators: [Spring Ini
 
 `java-kit-spring-boot-run` builds with Maven `package -DskipTests` or Gradle `bootJar -x test`, then starts the newest runnable JAR with the resolved project JDK. The stop and restart commands affect only the process recorded for the current module.
 
-Configure Tomcat before deploying:
+Tomcat is detected from `CATALINA_HOME`, `catalina.sh` on `PATH`, or an unambiguous conventional macOS/Linux installation. Homebrew keeps configuration under `etc/tomcat@9`, but the installation home is its `libexec` directory:
 
 ```emacs-lisp
-(setopt java-kit-tomcat-home "/path/to/tomcat"
+(setopt java-kit-tomcat-home "/opt/homebrew/opt/tomcat@9/libexec"
         java-kit-tomcat-context-name "ROOT")
 ```
 
-`java-kit-tomcat-deploy` builds a WAR, replaces only the configured WAR file in `webapps`, and starts `catalina.sh run` as a tracked foreground process. It never uses `pgrep` or kills an unrelated Tomcat. A single Tomcat home cannot be managed concurrently for two projects.
+For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALINA_BASE` model](https://tomcat.apache.org/tomcat-9.0-doc/introduction.html#CATALINA_HOME_and_CATALINA_BASE), configure both directories; the base must be writable by Emacs:
+
+```emacs-lisp
+(setopt java-kit-tomcat-home "/usr/share/tomcat10"
+        java-kit-tomcat-base "/var/lib/tomcat10")
+```
+
+Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its `conf` and `webapps` entries point to `/etc/tomcat9` and `/var/lib/tomcat9/webapps`. The effective `webapps` directory must be writable by the Emacs user.
+
+`CATALINA_BASE` is honored when `java-kit-tomcat-base` is nil; otherwise the base defaults to the detected home. `java-kit-tomcat-deploy` validates write access before building a WAR, replaces only the configured WAR file in the base's `webapps`, and starts the home's `catalina.sh run` as a tracked foreground process. It never uses `pgrep` or kills an unrelated Tomcat. A single Tomcat base cannot be managed concurrently for two projects.
 
 Use a prefix argument with Spring Boot run or Tomcat deploy/restart to enable JDWP. `java-kit-app-auto-debug-attach` can attach Dape after the readiness message; it defaults to nil. `java-kit-dape-attach` can also attach manually to any listening JDWP port through the JDTLS Java Debug adapter.
 

@@ -238,6 +238,7 @@ Each entry has the form `NAME=VALUE'."
 (autoload 'java-kit-tomcat-stop "java-kit-app" nil t)
 (autoload 'java-kit-tomcat-restart "java-kit-app" nil t)
 (autoload 'java-kit-app-status "java-kit-app" nil t)
+(autoload 'java-kit-detect-tomcat-home "java-kit-app" nil nil)
 (autoload 'java-kit-install-jdtls "java-kit-install" nil t)
 (autoload 'java-kit-install-junit "java-kit-install" nil t)
 (autoload 'java-kit-tools-status "java-kit-install" nil t)

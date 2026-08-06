@@ -63,13 +63,27 @@ This value does not override the application's own server configuration."
   :type '(repeat string)
   :group 'java-kit)
 
-(defcustom java-kit-tomcat-home nil
+(defcustom java-kit-tomcat-home #'java-kit-detect-tomcat-home
   "Tomcat installation used by deployment and lifecycle commands.
 
 The value may be a directory or a function receiving the project context and
-returning a directory."
-  :type '(choice (const :tag "Not configured" nil)
+returning a directory.  The default detects `CATALINA_HOME', a `catalina.sh'
+on PATH, or an unambiguous platform-standard installation."
+  :type '(choice (const :tag "Auto-detect" java-kit-detect-tomcat-home)
+                 (const :tag "Not configured" nil)
                  (directory :tag "Tomcat home")
+                 (function :tag "Resolver function"))
+  :group 'java-kit)
+
+(defcustom java-kit-tomcat-base nil
+  "Tomcat runtime instance used by deployment and lifecycle commands.
+
+The value may be nil, a directory, or a function receiving the project
+context and returning a directory.  Nil uses `CATALINA_BASE' when set and
+otherwise uses `java-kit-tomcat-home'.  Set this separately for Linux package
+layouts that split executable files and writable runtime state."
+  :type '(choice (const :tag "Environment or Tomcat home" nil)
+                 (directory :tag "Tomcat base")
                  (function :tag "Resolver function"))
   :group 'java-kit)
 
@@ -96,7 +110,7 @@ receiving the project context and returning a string or nil."
 (cl-defstruct (java-kit-app--service
                (:constructor java-kit-app--service-create))
   "State for one java-kit-managed process."
-  key kind context process status debug port debug-port source-buffer home
+  key kind context process status debug port debug-port source-buffer home base
   ready-regexp output-tail on-success)
 
 (defvar java-kit-app--services (make-hash-table :test #'equal)
@@ -241,14 +255,15 @@ receiving the project context and returning a string or nil."
 
 (cl-defun java-kit-app--start-process
     (context kind command status
-             &key ready-regexp debug port debug-port home environment
+             &key ready-regexp debug port debug-port home base environment
              source-buffer on-success)
   "Start COMMAND for CONTEXT and register it as KIND with STATUS.
 
 READY-REGEXP marks the process running.  DEBUG, PORT, and DEBUG-PORT describe
-its endpoints.  HOME identifies an external server installation, ENVIRONMENT
-overrides its subprocess environment, SOURCE-BUFFER retains editor context,
-and ON-SUCCESS runs after a successful finite process."
+its endpoints.  HOME and BASE identify an external server installation and
+runtime instance.  ENVIRONMENT overrides its subprocess environment,
+SOURCE-BUFFER retains editor context, and ON-SUCCESS runs after a successful
+finite process."
   (when (java-kit-app--live-service context kind)
     (user-error "%s is already active for %s"
                 kind (plist-get context :name)))
@@ -284,7 +299,8 @@ and ON-SUCCESS runs after a successful finite process."
             (java-kit-app--service-create
              :key key :kind kind :context context :process process
              :status status :debug debug :port port :debug-port debug-port
-             :source-buffer (or source-buffer (current-buffer)) :home home
+             :source-buffer (or source-buffer (current-buffer))
+             :home home :base base
              :ready-regexp ready-regexp :output-tail ""
              :on-success on-success))
       (puthash key service java-kit-app--services)
@@ -409,17 +425,97 @@ With prefix argument DEBUG, enable JDWP."
     (java-kit-app--stop context 'spring-boot)
     (java-kit-spring-boot-run debug)))
 
+(defun java-kit-app--tomcat-home-p (directory)
+  "Return non-nil when DIRECTORY contains a Tomcat launcher."
+  (and (stringp directory)
+       (file-directory-p directory)
+       (file-regular-p (expand-file-name "bin/catalina.sh" directory))))
+
+(defun java-kit-app--tomcat-launcher-home ()
+  "Return the Tomcat home containing `catalina.sh' on PATH."
+  (when-let* ((launcher (executable-find "catalina.sh")))
+    (let* ((launcher (expand-file-name launcher))
+           (home (file-name-directory
+                  (directory-file-name (file-name-directory launcher)))))
+      (or (and (java-kit-app--tomcat-home-p home)
+               (directory-file-name home))
+          (let* ((real-launcher (file-truename launcher))
+                 (real-home
+                  (file-name-directory
+                   (directory-file-name
+                    (file-name-directory real-launcher)))))
+            (and (java-kit-app--tomcat-home-p real-home)
+                 (directory-file-name real-home)))))))
+
+(defun java-kit-app--tomcat-installations ()
+  "Return valid Tomcat homes in platform-standard locations."
+  (let ((patterns
+         (pcase system-type
+           ('darwin
+            '("/opt/homebrew/opt/tomcat*/libexec"
+              "/usr/local/opt/tomcat*/libexec"))
+           ('gnu/linux
+            '("/opt/tomcat*" "/opt/apache-tomcat-*"
+              "/usr/local/tomcat*" "/usr/local/apache-tomcat-*"
+              "/usr/share/tomcat*")))))
+    (delete-dups
+     (seq-filter
+      #'java-kit-app--tomcat-home-p
+      (mapcan (lambda (pattern)
+                (file-expand-wildcards pattern t))
+              patterns)))))
+
+(defun java-kit-detect-tomcat-home (&optional _context)
+  "Return an unambiguous Tomcat installation for the current system.
+
+Honor `CATALINA_HOME' first, then a `catalina.sh' on PATH, then conventional
+macOS Homebrew or Linux installation locations.  _CONTEXT is accepted so this
+function can be used directly as a project-aware customization resolver."
+  (let ((environment-home (getenv "CATALINA_HOME")))
+    (cond
+     ((and environment-home (not (string-empty-p environment-home)))
+      (unless (java-kit-app--tomcat-home-p environment-home)
+        (user-error "CATALINA_HOME is not a Tomcat installation: %s"
+                    environment-home))
+      (directory-file-name (expand-file-name environment-home)))
+     ((java-kit-app--tomcat-launcher-home))
+     (t
+      (pcase (java-kit-app--tomcat-installations)
+        ('nil nil)
+        (`(,home) (directory-file-name (expand-file-name home)))
+        (homes
+         (user-error "Multiple Tomcat installations found: %s"
+                     (string-join homes ", "))))))))
+
 (defun java-kit-app--tomcat-home (context)
   "Resolve and validate the Tomcat home for CONTEXT."
   (let ((home (java-kit--configured-value java-kit-tomcat-home context)))
     (unless (and (stringp home) (not (string-empty-p home)))
-      (user-error "Configure `java-kit-tomcat-home' first"))
+      (user-error
+       "Could not detect Tomcat; configure `java-kit-tomcat-home'"))
     (setq home (directory-file-name (expand-file-name home)))
-    (unless (file-directory-p (expand-file-name "webapps" home))
-      (user-error "Tomcat webapps directory is missing under %s" home))
-    (unless (file-regular-p (expand-file-name "bin/catalina.sh" home))
+    (unless (java-kit-app--tomcat-home-p home)
       (user-error "Tomcat catalina.sh is missing under %s" home))
     home))
+
+(defun java-kit-app--tomcat-base (context home)
+  "Resolve and validate the Tomcat runtime base for CONTEXT and HOME."
+  (let* ((configured
+          (java-kit--configured-value java-kit-tomcat-base context))
+         (environment-base (getenv "CATALINA_BASE"))
+         (base (or configured
+                   (and environment-base
+                        (not (string-empty-p environment-base))
+                        environment-base)
+                   home)))
+    (setq base (directory-file-name (expand-file-name base)))
+    (unless (file-directory-p (expand-file-name "conf" base))
+      (user-error "Tomcat conf directory is missing under %s" base))
+    (unless (file-directory-p (expand-file-name "webapps" base))
+      (user-error "Tomcat webapps directory is missing under %s" base))
+    (unless (file-writable-p (expand-file-name "webapps" base))
+      (user-error "Tomcat webapps directory is not writable under %s" base))
+    base))
 
 (defun java-kit-app--tomcat-command (home debug)
   "Return the foreground Tomcat command under HOME for DEBUG mode."
@@ -427,25 +523,27 @@ With prefix argument DEBUG, enable JDWP."
     (append (if (file-executable-p script) (list script) (list "sh" script))
             (if debug '("jpda" "run") '("run")))))
 
-(defun java-kit-app--tomcat-process-environment (context home debug)
-  "Return the Tomcat environment for CONTEXT, HOME, and DEBUG mode."
+(defun java-kit-app--tomcat-process-environment (context home base debug)
+  "Return the Tomcat environment for CONTEXT, HOME, BASE, and DEBUG mode."
   (let ((environment (java-kit-project-process-environment context)))
     (setq environment
           (java-kit--environment-merge
-           environment (list (concat "CATALINA_HOME=" home))))
+           environment
+           (list (concat "CATALINA_HOME=" home)
+                 (concat "CATALINA_BASE=" base))))
     (if debug
         (java-kit--environment-merge
          environment
          (list (format "JPDA_ADDRESS=%d" java-kit-tomcat-debug-port)))
       environment)))
 
-(defun java-kit-app--tomcat-conflict (home)
-  "Return a live java-kit Tomcat service using HOME."
+(defun java-kit-app--tomcat-conflict (base)
+  "Return a live java-kit Tomcat service using BASE."
   (let (found)
     (maphash
      (lambda (_key service)
        (when (and (eq (java-kit-app--service-kind service) 'tomcat)
-                  (equal home (java-kit-app--service-home service))
+                  (equal base (java-kit-app--service-base service))
                   (process-live-p (java-kit-app--service-process service)))
          (setq found service)))
      java-kit-app--services)
@@ -462,8 +560,8 @@ With prefix argument DEBUG, enable JDWP."
                directory "\\.war\\'" "\\(?:-sources\\|-javadoc\\)\\.war\\'")))
     (or war (user-error "No WAR artifact found under %s" directory))))
 
-(defun java-kit-app--deploy-war (context home)
-  "Copy CONTEXT's built WAR into Tomcat HOME and return its destination."
+(defun java-kit-app--deploy-war (context base)
+  "Copy CONTEXT's built WAR into Tomcat BASE and return its destination."
   (let* ((war (java-kit-app--war context))
          (configured-name
           (java-kit--configured-value java-kit-tomcat-context-name context))
@@ -472,18 +570,19 @@ With prefix argument DEBUG, enable JDWP."
               (concat configured-name ".war")
             (file-name-nondirectory war)))
          (destination (expand-file-name file-name
-                                        (expand-file-name "webapps" home))))
+                                        (expand-file-name "webapps" base))))
     (copy-file war destination t)
     destination))
 
-(defun java-kit-app--start-tomcat (context home debug source-buffer)
-  "Start Tomcat HOME for CONTEXT in DEBUG mode from SOURCE-BUFFER."
-  (when-let* ((conflict (java-kit-app--tomcat-conflict home)))
-    (user-error "Tomcat %s is already managed for %s"
-                home
+(defun java-kit-app--start-tomcat (context home base debug source-buffer)
+  "Start Tomcat HOME and BASE for CONTEXT in DEBUG mode from SOURCE-BUFFER."
+  (when-let* ((conflict (java-kit-app--tomcat-conflict base)))
+    (user-error "Tomcat base %s is already managed for %s"
+                base
                 (plist-get (java-kit-app--service-context conflict) :name)))
   (let ((environment
-         (java-kit-app--tomcat-process-environment context home debug)))
+         (java-kit-app--tomcat-process-environment
+          context home base debug)))
     (java-kit-app--start-process
      context 'tomcat (java-kit-app--tomcat-command home debug)
      'starting
@@ -491,7 +590,7 @@ With prefix argument DEBUG, enable JDWP."
      :debug debug
      :port java-kit-tomcat-port
      :debug-port (and debug java-kit-tomcat-debug-port)
-     :home home
+     :home home :base base
      :environment environment
      :source-buffer source-buffer)))
 
@@ -503,20 +602,21 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
   (interactive "P")
   (let* ((context (java-kit-project-context))
          (home (java-kit-app--tomcat-home context))
+         (base (java-kit-app--tomcat-base context home))
          (source-buffer (current-buffer)))
     (java-kit-app--start-process
      context 'tomcat-build
      (java-kit-app--build-arguments context 'tomcat)
      'building
-     :home home
+     :home home :base base
      :source-buffer source-buffer
      :on-success
      (lambda ()
        (java-kit-app--stop context 'tomcat)
-       (let ((destination (java-kit-app--deploy-war context home)))
+       (let ((destination (java-kit-app--deploy-war context base)))
          (message "Deployed %s" destination))
        (java-kit-app--start-tomcat
-        context home debug source-buffer)))))
+        context home base debug source-buffer)))))
 
 ;;;###autoload
 (defun java-kit-tomcat-stop ()
@@ -532,9 +632,11 @@ With prefix argument DEBUG, enable JPDA."
   (interactive "P")
   (let* ((context (java-kit-project-context))
          (home (java-kit-app--tomcat-home context))
+         (base (java-kit-app--tomcat-base context home))
          (source-buffer (current-buffer)))
     (java-kit-app--stop context 'tomcat)
-    (java-kit-app--start-tomcat context home debug source-buffer)))
+    (java-kit-app--start-tomcat
+     context home base debug source-buffer)))
 
 ;;;###autoload
 (defun java-kit-app-status ()
