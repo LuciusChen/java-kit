@@ -320,6 +320,7 @@ CLASS is launched with MODULE-PATHS and CLASS-PATHS."
                :request "launch"
                :mainClass class
                :projectName (plist-get context :name)
+               :javaExec (java-kit--project-java-program context)
                :cwd (plist-get context :module-root)
                :modulePaths (vconcat module-paths)
                :classPaths (vconcat class-paths)
@@ -383,6 +384,7 @@ CLASSPATHS contain project outputs, while CLASS and METHOD select the test."
                  :request "launch"
                  :mainClass "org.junit.platform.console.ConsoleLauncher"
                  :projectName (plist-get context :name)
+                 :javaExec (java-kit--project-java-program context)
                  :cwd (plist-get context :module-root)
                  :classPaths (vconcat (cons jar classpaths))
                  :args (combine-and-quote-strings arguments)

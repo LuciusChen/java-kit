@@ -84,12 +84,25 @@ With `java-kit-jdtls-command` nil, the installed `java-kit` launcher is preferre
 
 ## JDK model
 
-JDTLS and project subprocesses have separate JDK settings:
+java-kit keeps tool, project, and container runtimes separate:
+
+| Role | Setting | Consumers |
+| --- | --- | --- |
+| Tool JDK | `java-kit-jdtls-java-home` | JDTLS and its Microsoft Java Debug adapter bundle |
+| Project JDK | `java-kit-project-java-home` | builds, direct runs, Spring Boot, and Dape Main/JUnit debug targets |
+| Container JDK | `java-kit-tomcat-java-home` | Tomcat; nil reuses the project JDK |
+
+Current JDTLS releases require Java 21 or newer, but the project and debug target may remain on Java 8. A Tomcat installation may also require a newer runtime than the WAR it hosts. None of these settings changes Emacs' global `JAVA_HOME` or `PATH`.
+
+Configure a modern tool/container JDK without changing project detection:
 
 ```emacs-lisp
 (setopt java-kit-jdtls-java-home "/path/to/jdk-21"
+        java-kit-tomcat-java-home "/path/to/jdk-21"
         java-kit-project-java-home nil)
 ```
+
+Typical homes are `/usr/lib/jvm/java-21-openjdk` on Linux and `/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home` on macOS. `java-kit-tomcat-java-home` is optional when Tomcat can use the project JDK.
 
 For project processes, `java-kit` checks an interactive per-module choice, an explicit customization, `org.gradle.java.home`, then these version declarations in order:
 
@@ -99,7 +112,7 @@ For project processes, `java-kit` checks an interactive per-module choice, an ex
 4. Maven compiler properties or `maven-compiler-plugin` configuration
 5. common Gradle toolchain and source-compatibility syntax
 
-On macOS, versions are resolved through `/usr/libexec/java_home`; on Linux, installed homes under `/usr/lib/jvm` are considered. `M-x java-kit-select-project-jdk` records a choice only for the current build module, and `C-u M-x java-kit-select-project-jdk` clears it. No command changes Emacs' global `JAVA_HOME` or `PATH`.
+On macOS, project versions are resolved through `/usr/libexec/java_home`; on Linux, installed homes under `/usr/lib/jvm` are considered. `M-x java-kit-select-project-jdk` records a choice only for the current build module, and `C-u M-x java-kit-select-project-jdk` clears it.
 
 For a persistent project override, use `.dir-locals.el`:
 
@@ -120,6 +133,8 @@ Launcher JVM arguments, initialization options, workspace location, and extensio
 ```
 
 Each project gets a JDTLS data directory derived from its complete project path, so equal directory basenames do not collide. Project JDK settings are sent to JDTLS without changing the JDK that launches JDTLS.
+
+The Java Debug adapter runs inside the modern JDTLS tool JVM; Dape itself does not launch Java. For Main and JUnit launch sessions, java-kit sends the resolved project `bin/java` as Java Debug's `javaExec`, so a Java 21 adapter can launch and debug a Java 8 target. Attach sessions do not select or replace the target runtime—they connect to the existing JVM over JDWP. See the [Microsoft Java Debug configuration](https://github.com/microsoft/vscode-java-debug/blob/main/Configuration.md) for the launch and attach protocol fields.
 
 `java-kit-eglot-register` also registers the `jdt://` file handler. Dependency class contents requested through `java/classFileContents` are cached as read-only Java files. Use `java-kit-clear-class-cache` to remove that cache, or `java-kit-jdt-uri-unregister` to remove the handler.
 
@@ -173,10 +188,7 @@ For a Linux package that follows [Tomcat's separate `CATALINA_HOME` and `CATALIN
         java-kit-tomcat-base "/var/lib/tomcat10")
 ```
 
-Tomcat's runtime JDK is independent from the application's compilation JDK.
-This matters for legacy applications: a Java 8 WAR can run on a Tomcat package
-whose JSP compiler requires a newer Java runtime.  Keep the project JDK at its
-declared version and configure only the container runtime:
+Tomcat's runtime JDK is independent from the application's compilation JDK. This matters for legacy applications: a Java 8 WAR can run on a Tomcat package whose JSP compiler requires a newer Java runtime. Keep the project JDK at its declared version and configure only the container runtime:
 
 ```emacs-lisp
 (setopt java-kit-tomcat-java-home "/usr/lib/jvm/java-21-openjdk")

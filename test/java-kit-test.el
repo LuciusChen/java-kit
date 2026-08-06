@@ -904,14 +904,23 @@
     (should (= 4711 (plist-get config 'port)))
     (should (= 5005 (plist-get config :port)))
     (should (equal "localhost" (plist-get config :hostName)))
-    (should (equal "attach" (plist-get config :request)))))
+    (should (equal "attach" (plist-get config :request)))
+    (should-not (plist-member config :javaExec))))
 
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root
     (let* ((file (java-kit-test--write-file
                   (expand-file-name "Main.java" root)))
+           (project-jdk (java-kit-test--fake-jdk
+                         (expand-file-name
+                          "Library/Java/JavaVirtualMachines/temurin-8.jdk/Contents/Home"
+                          root)
+                         "1.8.0_402"))
            (context (list :name "sample"
+                          :root (file-name-as-directory root)
                           :module-root (file-name-as-directory root)))
+           (java-kit-project-java-home project-jdk)
+           (java-kit-project-java-version nil)
            (java-kit-main-arguments '("one" "two words"))
            (java-kit-main-jvm-arguments '("-ea"))
            (java-kit-main-environment '("APP_ENV=debug"))
@@ -937,6 +946,8 @@
       (should (= 4711 (plist-get captured 'port)))
       (should (equal "launch" (plist-get captured :request)))
       (should (equal "example.Main" (plist-get captured :mainClass)))
+      (should (equal (expand-file-name "bin/java" project-jdk)
+                     (plist-get captured :javaExec)))
       (should (equal ["/tmp/classes"]
                      (plist-get captured :classPaths)))
       (should (equal "one \"two words\""
@@ -946,11 +957,16 @@
 
 (ert-deftest java-kit-test-debug-test-launches-junit-console-through-adapter ()
   (java-kit-test--with-temp-directory root
-    (let* ((jar (java-kit-test--write-file
+    (let* ((project-jdk (java-kit-test--fake-jdk
+                         (expand-file-name "jdk-17" root) "17.0.12"))
+           (jar (java-kit-test--write-file
                  (expand-file-name "junit.jar" root)))
            (java-kit-junit-console-jar jar)
+           (java-kit-project-java-home project-jdk)
+           (java-kit-project-java-version nil)
            (java-kit-test-environment '("TEST_ENV=debug"))
            (context (list :name "sample"
+                          :root (file-name-as-directory root)
                           :module-root (file-name-as-directory root)))
            (config
             (java-kit-debug--test-config
@@ -959,6 +975,8 @@
       (should (= 4711 (plist-get config 'port)))
       (should (equal "org.junit.platform.console.ConsoleLauncher"
                      (plist-get config :mainClass)))
+      (should (equal (expand-file-name "bin/java" project-jdk)
+                     (plist-get config :javaExec)))
       (should (equal (vector jar "/tmp/test classes")
                      (plist-get config :classPaths)))
       (should
