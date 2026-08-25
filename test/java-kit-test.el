@@ -570,9 +570,30 @@
   (let ((process-environment '("PATH=/usr/bin")))
     (cl-letf (((symbol-function 'java-kit-app--tomcat-launcher-home)
                (lambda () nil))
+              ((symbol-function 'java-kit-app--user-tomcat-installations)
+               (lambda () nil))
               ((symbol-function 'java-kit-app--tomcat-installations)
                (lambda () '("/opt/tomcat9" "/opt/tomcat10"))))
       (should-error (java-kit-detect-tomcat-home) :type 'user-error))))
+
+(ert-deftest java-kit-test-tomcat-auto-detection-prefers-user-installation ()
+  (let ((system-type 'gnu/linux)
+        (process-environment '("PATH=/usr/bin")))
+    (cl-letf (((symbol-function 'java-kit-app--tomcat-launcher-home)
+               (lambda () nil))
+              ((symbol-function 'java-kit-app--user-tomcat-installations)
+               (lambda () '("/home/user/tomcat9")))
+              ((symbol-function 'java-kit-app--tomcat-installations)
+               (lambda () '("/usr/share/tomcat9"))))
+      (should (equal "/home/user/tomcat9"
+                     (java-kit-detect-tomcat-home))))))
+
+(ert-deftest java-kit-test-tomcat-user-installation-scan-is-linux-only ()
+  (let ((system-type 'darwin))
+    (cl-letf (((symbol-function 'file-expand-wildcards)
+               (lambda (&rest _arguments)
+                 (ert-fail "macOS must not scan Linux user Tomcat paths"))))
+      (should-not (java-kit-app--user-tomcat-installations)))))
 
 (ert-deftest java-kit-test-tomcat-auto-detection-scans-arch-layout ()
   (java-kit-test--with-temp-directory root

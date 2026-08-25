@@ -513,12 +513,23 @@ With prefix argument DEBUG, enable JDWP."
                 (file-expand-wildcards pattern t))
               patterns)))))
 
+(defun java-kit-app--user-tomcat-installations ()
+  "Return Linux Tomcat homes installed directly under the user's home."
+  (when (eq system-type 'gnu/linux)
+    (delete-dups
+     (seq-filter
+      #'java-kit-app--tomcat-home-p
+      (mapcan (lambda (pattern)
+                (file-expand-wildcards (expand-file-name pattern "~") t))
+              '("tomcat*" "apache-tomcat-*"))))))
+
 (defun java-kit-detect-tomcat-home (&optional _context)
   "Return an unambiguous Tomcat installation for the current system.
 
-Honor `CATALINA_HOME' first, then a `catalina.sh' on PATH, then conventional
-macOS Homebrew or Linux installation locations.  _CONTEXT is accepted so this
-function can be used directly as a project-aware customization resolver."
+Honor `CATALINA_HOME' first, then a `catalina.sh' on PATH, a user-local
+installation, and finally conventional macOS Homebrew or Linux installation
+locations.  _CONTEXT is accepted so this function can be used directly as a
+project-aware customization resolver."
   (let ((environment-home (getenv "CATALINA_HOME")))
     (cond
      ((and environment-home (not (string-empty-p environment-home)))
@@ -528,7 +539,8 @@ function can be used directly as a project-aware customization resolver."
       (directory-file-name (expand-file-name environment-home)))
      ((java-kit-app--tomcat-launcher-home))
      (t
-      (pcase (java-kit-app--tomcat-installations)
+      (pcase (or (java-kit-app--user-tomcat-installations)
+                 (java-kit-app--tomcat-installations))
         ('nil nil)
         (`(,home) (directory-file-name (expand-file-name home)))
         (homes
