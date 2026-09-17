@@ -1003,19 +1003,22 @@ Apply ENVIRONMENT-ADDITIONS only to the new process."
                 class)
           arguments))
 
-(defun java-kit--junit-command (context classpaths class method)
-  "Return the JUnit command for CONTEXT, CLASSPATHS, CLASS, and METHOD."
+(defun java-kit--junit-console-launch (classpaths class method)
+  "Return the Console JAR and arguments for CLASSPATHS, CLASS and METHOD."
   (let ((jar (expand-file-name java-kit-junit-console-jar)))
     (unless (file-regular-p jar)
       (user-error
        "JUnit Console JAR is missing: %s; install or configure it first" jar))
-    (append
-     (list (java-kit--project-java-program context))
-     java-kit-test-jvm-arguments
-     (list "-jar" jar "execute"
+    (list jar "execute"
            "--class-path" (mapconcat #'identity classpaths path-separator)
            (if method "--select-method" "--select-class")
-           (if method (concat class "#" method) class)))))
+           (if method (concat class "#" method) class))))
+
+(defun java-kit--junit-command (context classpaths class method)
+  "Return the JUnit command for CONTEXT, CLASSPATHS, CLASS, and METHOD."
+  (append (list (java-kit--project-java-program context))
+          java-kit-test-jvm-arguments (list "-jar")
+          (java-kit--junit-console-launch classpaths class method)))
 
 ;;;###autoload
 (defun java-kit-run-main (&optional debug)

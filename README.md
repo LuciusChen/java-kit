@@ -160,6 +160,14 @@ Program, JVM, and environment arguments are configurable without shell interpola
 
 Focused JUnit runs require `java-kit-junit-console-jar`; install it explicitly with `java-kit-install-junit`. A prefix argument to `java-kit-run-main` or `java-kit-run-test` routes to the corresponding Dape debug command.
 
+## Debug launch preparation
+
+`java-kit-debug-main` resolves the current file's main classes and their actual JDTLS project names; multiple entry points prompt for a choice. Both main and test debug launches explicitly use the resolved project JDK, preserve configured environment variables, and use `integratedTerminal` so the program can read standard input. Set `java-kit-debug-console` to `"internalConsole"` for output in Dape's REPL instead.
+
+Before a java-kit launch command starts Dape, it saves modified file buffers in the project and requests an asynchronous JDTLS incremental build. Only a `SUCCEED` response starts the adapter; compile errors, cancellation and timeouts prevent launch. Editing while the build is pending does not cancel the launch: it uses the compiled classes and reports that unsaved edits are not included. Closing or renaming the originating source buffer cancels with a message. The default `java-kit-debug-build-timeout` is 120 seconds. Set `java-kit-debug-build-before-launch` to nil only when compilation is managed separately. Attach sessions do not rebuild the target JVM.
+
+Dape restart reuses the resolved launch options and obtains a fresh adapter port. Run the java-kit launch command again to rebuild and resolve changed launch settings. Each build module has at most one active java-kit Dape session; stop or restart it before launching another for that module. While a java-kit session is being prepared or initialized, another java-kit start is rejected. Initialization timeout releases its resources, closes an associated Dape connection and rejects any delayed launch or attach request.
+
 ## Creating files and projects
 
 `java-kit-new-java-type` asks JDTLS for project source roots, then creates a class, record, enum, interface, annotation, or JUnit test from a small local template. It rejects invalid qualified names and existing destination files.
@@ -202,7 +210,7 @@ Use a prefix argument with Spring Boot run or Tomcat deploy/restart to enable JD
 
 For Dape launch commands, the JDTLS debug-adapter transport port and the target JVM's JDWP port remain distinct. This fixes the port conflation in the old server package.
 
-Hot Code Replace is controlled by `java-kit-hot-code-replace-mode`: `auto` reacts to Java Debug's completed-build event, `manual` enables only `M-x java-kit-hot-replace`, and `never` disables replacement. If the debuggee is running, java-kit queues the standard Java Debug `redefineClasses` request, pauses it through Dape's public request API, and resumes only after the request finishes. Structural JVM changes still require a restart.
+Hot Code Replace is controlled by `java-kit-hot-code-replace-mode`: `auto` reacts to Java Debug's completed-build event, `manual` enables only `M-x java-kit-hot-replace`, and `never` disables replacement. If the debuggee is running, java-kit queues the standard Java Debug `redefineClasses` request and pauses it through Dape's public request API. It resumes all threads after replacement only when the stop matches its own VM-wide pause; a real breakpoint or exception stop remains paused. Structural JVM changes still require a restart.
 
 The old package's generated Attach API agent and exploded-Tomcat class-copy fallback are not copied. They were private implementation-specific optimizations; java-kit provides the same public Hot Code Replace workflow through the supported Java Debug adapter boundary.
 
@@ -241,6 +249,15 @@ emacs -Q --batch -L . -f batch-byte-compile \
 ```
 
 The suite uses temporary directories and mocked protocol/process boundaries; it does not require a local JDK, Maven repository, active Eglot session, or running application server.
+
+The optional Dape integration extends `dape-handle-event` and advises the public `dape-request` function for session ownership. A fresh local marker identifies each java-kit launch or attach request and is removed before sending it to the adapter. This integration does not inspect Dape connection classes, constructors, slots or process objects.
+
+With Dape available, also run the loopback protocol tests. They verify DAP launch arguments, session ownership, startup cancellation and restart behavior without a Java installation:
+
+```sh
+emacs -Q --batch -L . -L ../dape --eval '(setq load-prefer-newer t)' \
+  -l test/java-kit-protocol-test.el -f ert-run-tests-batch-and-exit
+```
 
 ## License
 
