@@ -1110,21 +1110,30 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
           (when-let* ((buffer (get-buffer (format "*java-kit tomcat:%s*" name))))
             (kill-buffer buffer)))))))
 
-(ert-deftest java-kit-test-spring-boot-restart-starts-after-the-old-process-exits ()
-  (let (steps)
-    (cl-letf (((symbol-function 'java-kit-project-context)
-               (lambda (&optional _directory) '(:name "sample")))
-              ((symbol-function 'java-kit-app--stop)
-               (lambda (_context _kind &optional _quiet on-stopped)
-                 (push 'stop steps)
-                 (push on-stopped steps)))
-              ((symbol-function 'java-kit-spring-boot-run)
-               (lambda (&optional debug) (push (list 'run debug) steps))))
-      (java-kit-spring-boot-restart 'debug)
-      (should (equal '(stop) (cl-remove-if #'functionp steps)))
-      ;; Nothing runs until the stop completes.
-      (funcall (cl-find-if #'functionp steps))
-      (should (equal '(run debug) (car steps))))))
+(ert-deftest java-kit-test-spring-boot-restart-keeps-the-requested-project ()
+  (let ((context '(:name "a"))
+        (source (generate-new-buffer " restart-source"))
+        continuation runs)
+    (unwind-protect
+        (cl-letf (((symbol-function 'java-kit-project-context)
+                   (lambda (&optional _directory) context))
+                  ((symbol-function 'java-kit-app--stop)
+                   (lambda (_context _kind &optional _quiet on-stopped)
+                     (setq continuation on-stopped)))
+                  ((symbol-function 'java-kit-app--run-spring)
+                   (lambda (run-context debug run-source)
+                     (push (list run-context debug run-source) runs))))
+          (with-current-buffer source
+            (java-kit-spring-boot-restart 'debug))
+          ;; Nothing runs until the old process has exited.
+          (should-not runs)
+          ;; Meanwhile the source buffer is gone and another project is
+          ;; current; the restart still targets the project it was asked for.
+          (kill-buffer source)
+          (setq context '(:name "b"))
+          (funcall continuation)
+          (should (equal (list (list '(:name "a") 'debug source)) runs)))
+      (when (buffer-live-p source) (kill-buffer source)))))
 
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root

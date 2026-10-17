@@ -490,6 +490,20 @@ Return non-nil when a live process is being stopped."
      :debug-port (and debug java-kit-spring-boot-debug-port)
      :source-buffer source-buffer)))
 
+(defun java-kit-app--run-spring (context debug source-buffer)
+  "Build, then run CONTEXT's Spring Boot module in DEBUG mode from SOURCE-BUFFER."
+  (when (java-kit-app--live-service context 'spring-boot)
+    (user-error "Spring Boot is already active for %s"
+                (plist-get context :name)))
+  (java-kit-app--start-process
+   context 'spring-build
+   (java-kit-app--build-arguments context 'spring-boot)
+   'building
+   :source-buffer source-buffer
+   :on-success
+   (lambda ()
+     (java-kit-app--start-spring context debug source-buffer))))
+
 ;;;###autoload
 (defun java-kit-spring-boot-run (&optional debug)
   "Build and run the current Spring Boot module.
@@ -497,19 +511,8 @@ Return non-nil when a live process is being stopped."
 With prefix argument DEBUG, enable JDWP on
 `java-kit-spring-boot-debug-port'."
   (interactive "P")
-  (let ((context (java-kit-project-context))
-        (source-buffer (current-buffer)))
-    (when (java-kit-app--live-service context 'spring-boot)
-      (user-error "Spring Boot is already active for %s"
-                  (plist-get context :name)))
-    (java-kit-app--start-process
-     context 'spring-build
-     (java-kit-app--build-arguments context 'spring-boot)
-     'building
-     :source-buffer source-buffer
-     :on-success
-     (lambda ()
-       (java-kit-app--start-spring context debug source-buffer)))))
+  (java-kit-app--run-spring (java-kit-project-context) debug
+                            (current-buffer)))
 
 ;;;###autoload
 (defun java-kit-spring-boot-stop ()
@@ -523,12 +526,12 @@ With prefix argument DEBUG, enable JDWP on
 
 With prefix argument DEBUG, enable JDWP."
   (interactive "P")
-  (let ((source (current-buffer)))
+  (let ((context (java-kit-project-context))
+        (source (current-buffer)))
     (java-kit-app--stop
-     (java-kit-project-context) 'spring-boot t
+     context 'spring-boot t
      (lambda ()
-       (with-current-buffer (if (buffer-live-p source) source (current-buffer))
-         (java-kit-spring-boot-run debug))))))
+       (java-kit-app--run-spring context debug source)))))
 
 (defun java-kit-app--tomcat-home-p (directory)
   "Return non-nil when DIRECTORY contains a Tomcat launcher."
