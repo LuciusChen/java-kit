@@ -512,6 +512,18 @@ A groupId or version the POM does not declare comes from its own parent."
                           (java-kit--pom-property parent tag)))
                  '("groupId" "version"))))
 
+(defun java-kit--pom-read (file)
+  "Return the contents of POM FILE with its XML comments removed."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (while (re-search-forward "<!--" nil t)
+      (let ((start (match-beginning 0)))
+        (delete-region
+         start
+         (if (search-forward "-->" nil t) (point) (point-max)))))
+    (buffer-string)))
+
 (defun java-kit--pom-parent-file (content pom-file)
   "Return the local parent POM that POM-FILE's CONTENT declares, if any.
 An empty `relativePath' means the parent comes from a repository, and a file
@@ -530,9 +542,7 @@ at the path counts only when its coordinates match the declared parent."
         (setq file (expand-file-name "pom.xml" file)))
       (and file
            (file-readable-p file)
-           (with-temp-buffer
-             (insert-file-contents file)
-             (java-kit--pom-declares-p (buffer-string) parent))
+           (java-kit--pom-declares-p (java-kit--pom-read file) parent)
            file))))
 
 (defun java-kit--pom-chain (pom-file)
@@ -543,15 +553,7 @@ XML comments are removed, so commented-out settings are never read."
                 (file-readable-p pom-file)
                 (not (member (file-truename pom-file) visited)))
       (push (file-truename pom-file) visited)
-      (let ((content (with-temp-buffer
-                       (insert-file-contents pom-file)
-                       (goto-char (point-min))
-                       (while (re-search-forward "<!--" nil t)
-                         (let ((start (match-beginning 0)))
-                           (delete-region
-                            start
-                            (if (search-forward "-->" nil t) (point) (point-max)))))
-                       (buffer-string))))
+      (let ((content (java-kit--pom-read pom-file)))
         (push content chain)
         (setq pom-file (java-kit--pom-parent-file content pom-file))))
     (nreverse chain)))

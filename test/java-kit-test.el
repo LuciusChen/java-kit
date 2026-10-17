@@ -1777,5 +1777,19 @@
     (should (equal "17" (java-kit--maven-java-version
                          (expand-file-name "pom.xml" root))))))
 
+(ert-deftest java-kit-test-maven-parent-check-ignores-comments ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<!-- <version>0</version> --><version>1</version>"
+             "<properties><java.version>21</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>p</artifactId>"
+             "<version>1</version></parent></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
