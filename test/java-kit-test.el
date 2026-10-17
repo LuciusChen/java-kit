@@ -775,7 +775,7 @@
                  (setq callback
                        (plist-get (nthcdr 4 arguments) :on-success))))
               ((symbol-function 'java-kit-app--tomcat-conflict)
-               (lambda (_base _port) service))
+               (lambda (_base _port) (prog1 service (setq service nil))))
               ((symbol-function 'java-kit-app--stop)
                (lambda (stopped-context kind &optional quiet on-stopped)
                  (push (list stopped-context kind quiet) stopped)
@@ -786,8 +786,7 @@
       (java-kit-tomcat-deploy)
       (should callback)
       (funcall callback))
-    (should (equal (list (list current-context 'tomcat t)
-                         (list owner-context 'tomcat t))
+    (should (equal (list (list owner-context 'tomcat t))
                    (nreverse stopped)))))
 
 (ert-deftest java-kit-test-tomcat-deploy-selects-newest-war ()
@@ -928,17 +927,21 @@
       (should (gethash first-key java-kit-app--services))
       (should (gethash second-key java-kit-app--services)))))
 
-(defun java-kit-test--start-shell-service (root script kind)
-  "Start sh SCRIPT as a KIND service under ROOT and wait until it is up."
-  (let* ((module (file-name-as-directory (expand-file-name "app" root)))
-         (context (list :name "sample" :module-root module))
-         (up (expand-file-name "up" root)))
+(defun java-kit-test--start-shell-service (root script kind &rest keys)
+  "Start sh SCRIPT as a KIND service under ROOT and wait until it is up.
+KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
+  (let* ((dir (or (plist-get keys :dir) "app"))
+         (module (file-name-as-directory (expand-file-name dir root)))
+         (context (list :name dir :module-root module))
+         (up (expand-file-name (concat dir "-up") root)))
     (make-directory module t)
-    (java-kit-app--start-process
-     context kind
-     (list "sh" "-c" (format "echo up > %s; %s"
-                             (shell-quote-argument up) script))
-     'running)
+    (apply #'java-kit-app--start-process
+           context kind
+           (list "sh" "-c" (format "echo up > %s; %s"
+                                   (shell-quote-argument up) script))
+           'running
+           (cl-loop for (key value) on keys by #'cddr
+                    unless (eq key :dir) append (list key value)))
     (let ((deadline (+ (float-time) 5)))
       (while (and (not (file-exists-p up)) (< (float-time) deadline))
         (accept-process-output nil 0.05)))
@@ -978,7 +981,7 @@
             (should (equal '(first second) (nreverse order)))
             (should (file-exists-p marker))
             (should-not (java-kit-app--live-service context 'spring-boot)))
-        (when-let* ((buffer (get-buffer "*java-kit spring-boot:sample*")))
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
           (kill-buffer buffer))))))
 
 (ert-deftest java-kit-test-app-stop-kills-a-process-that-ignores-termination ()
@@ -999,7 +1002,7 @@
             (should (java-kit-test--wait-for (lambda () stopped)))
             (should-not (process-live-p process))
             (should-not (java-kit-app--live-service context 'tomcat)))
-        (when-let* ((buffer (get-buffer "*java-kit tomcat:sample*")))
+        (when-let* ((buffer (get-buffer "*java-kit tomcat:app*")))
           (kill-buffer buffer))))))
 
 (ert-deftest java-kit-test-app-stop-continues-at-once-without-a-process ()
@@ -1009,6 +1012,103 @@
                  (list :name "sample" :module-root "/none/") 'tomcat t
                  (lambda () (setq continued t))))
     (should continued)))
+
+(ert-deftest java-kit-test-app-output-while-stopping-does-not-mark-ready ()
+  (let ((service (java-kit-app--service-create
+                  :kind 'spring-boot :status 'stopping :debug t
+                  :port 8080 :debug-port 5005
+                  :ready-regexp "Started .* in"
+                  :output-tail "Started App in 1.2 seconds\n"))
+        notified attached)
+    (cl-letf (((symbol-function 'compilation-filter) #'ignore)
+              ((symbol-function 'java-kit-app--refresh-mode-line) #'ignore)
+              ((symbol-function 'java-kit-app--notify)
+               (lambda (&rest _) (setq notified t)))
+              ((symbol-function 'java-kit-app--auto-attach)
+               (lambda (_service) (setq attached t))))
+      (java-kit-app--process-filter service nil "Closing connection pool\n")
+      (should (eq 'stopping (java-kit-app--service-status service)))
+      (should-not (or notified attached))
+      (setf (java-kit-app--service-status service) 'starting)
+      (java-kit-app--process-filter service nil "Closing connection pool\n")
+      (should (eq 'running (java-kit-app--service-status service)))
+      (should (and notified attached)))))
+
+(ert-deftest java-kit-test-tomcat-deploys-queued-behind-a-stop-run-one-at-a-time ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (java-kit-tomcat-port 8080)
+           (base "/instances/shared")
+           (current nil)
+           (builds nil)
+           (failures nil)
+           (start-process (symbol-function 'java-kit-app--start-process))
+           (quick-stop "trap 'exit 0' TERM; while :; do sleep 0.05; done")
+           (contexts
+            (mapcar (lambda (dir)
+                      (list :name dir :build-system 'maven
+                            :module-root (file-name-as-directory
+                                          (expand-file-name dir root))))
+                    '("a" "b" "c"))))
+      ;; A holds the shared port and takes a moment to stop.
+      (java-kit-test--start-shell-service
+       root "trap 'sleep 0.4; exit 0' TERM; while :; do sleep 0.05; done"
+       'tomcat :dir "a" :base base :port 8080)
+      (unwind-protect
+          (cl-letf (((symbol-function 'java-kit-project-context)
+                     (lambda (&optional _directory) current))
+                    ((symbol-function 'java-kit-app--tomcat-home)
+                     (lambda (_context) "/tomcat"))
+                    ((symbol-function 'java-kit-app--tomcat-base)
+                     (lambda (_context _home) base))
+                    ((symbol-function 'java-kit-app--build-arguments)
+                     (lambda (_context _purpose) '("mvn" "package")))
+                    ((symbol-function 'java-kit-app--start-process)
+                     (lambda (&rest arguments)
+                       (if (eq 'tomcat-build (nth 1 arguments))
+                           (push (plist-get (nthcdr 4 arguments) :on-success)
+                                 builds)
+                         (apply start-process arguments))))
+                    ((symbol-function 'java-kit-app--deploy-war)
+                     (lambda (_context _base) "war"))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest arguments)
+                       (when (string-match-p "failed" format-string)
+                         (push (apply #'format format-string arguments)
+                               failures))))
+                    ;; Like the real function, refuse a busy base or port.
+                    ((symbol-function 'java-kit-app--start-tomcat)
+                     (lambda (context _home base _debug _source)
+                       (when (java-kit-app--tomcat-conflict
+                              base java-kit-tomcat-port)
+                         (user-error "Port in use"))
+                       (java-kit-test--start-shell-service
+                        root quick-stop 'tomcat
+                        :dir (plist-get context :name)
+                        :base base :port 8080))))
+            (dolist (context (cdr contexts))
+              (setq current context)
+              (java-kit-tomcat-deploy))
+            (setq builds (nreverse builds))
+            (mapc #'funcall builds)
+            (let ((c (nth 2 contexts)))
+              (should (java-kit-test--wait-for
+                       (lambda ()
+                         (and (java-kit-app--live-service c 'tomcat)
+                              (not (java-kit-app--live-service
+                                    (nth 1 contexts) 'tomcat))
+                              (not (java-kit-app--live-service
+                                    (nth 0 contexts) 'tomcat)))))))
+            (should-not failures))
+        (maphash (lambda (_key service)
+                   (when (process-live-p (java-kit-app--service-process service))
+                     (delete-process (java-kit-app--service-process service))))
+                 java-kit-app--services)
+        (dolist (name '("a" "b" "c"))
+          (when-let* ((buffer (get-buffer (format "*java-kit tomcat:%s*" name))))
+            (kill-buffer buffer)))))))
 
 (ert-deftest java-kit-test-spring-boot-restart-starts-after-the-old-process-exits ()
   (let (steps)

@@ -254,8 +254,10 @@ receiving the project context and returning a string or nil."
         (message "java-kit cannot auto-attach: source buffer was closed")))))
 
 (defun java-kit-app--mark-ready (service)
-  "Mark SERVICE as running and report readiness."
-  (unless (eq (java-kit-app--service-status service) 'running)
+  "Mark SERVICE as running and report readiness.
+Only a starting service can become ready; output printed while stopping
+may repeat the startup message."
+  (when (eq (java-kit-app--service-status service) 'starting)
     (setf (java-kit-app--service-status service) 'running)
     (java-kit-app--refresh-mode-line)
     (java-kit-app--notify
@@ -790,6 +792,19 @@ project-aware customization resolver."
      :environment environment
      :source-buffer source-buffer)))
 
+(defun java-kit-app--stop-tomcat-owners (context base then)
+  "Stop the Tomcat services holding CONTEXT's slot or BASE's port, then THEN.
+Check again after each exit: a deployment queued behind the same stop may
+have started a service meanwhile, and the latest deployment wins."
+  (if-let* ((service (or (java-kit-app--live-service context 'tomcat)
+                         (java-kit-app--tomcat-conflict
+                          base java-kit-tomcat-port))))
+      (java-kit-app--stop
+       (java-kit-app--service-context service) 'tomcat t
+       (lambda ()
+         (java-kit-app--stop-tomcat-owners context base then)))
+    (funcall then)))
+
 ;;;###autoload
 (defun java-kit-tomcat-deploy (&optional debug)
   "Build and deploy the current WAR, then start its configured Tomcat.
@@ -807,23 +822,13 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
      :source-buffer source-buffer
      :on-success
      (lambda ()
-       (java-kit-app--stop
-        context 'tomcat t
+       (java-kit-app--stop-tomcat-owners
+        context base
         (lambda ()
-          (let ((conflict (java-kit-app--tomcat-conflict
-                           base java-kit-tomcat-port))
-                (redeploy
-                 (lambda ()
-                   (let ((destination
-                          (java-kit-app--deploy-war context base)))
-                     (message "Deployed %s" destination))
-                   (java-kit-app--start-tomcat
-                    context home base debug source-buffer))))
-            (if conflict
-                (java-kit-app--stop
-                 (java-kit-app--service-context conflict) 'tomcat t
-                 redeploy)
-              (funcall redeploy)))))))))
+          (let ((destination (java-kit-app--deploy-war context base)))
+            (message "Deployed %s" destination))
+          (java-kit-app--start-tomcat
+           context home base debug source-buffer)))))))
 
 ;;;###autoload
 (defun java-kit-tomcat-stop ()
