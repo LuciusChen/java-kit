@@ -1673,5 +1673,46 @@
     (should-not (java-kit--maven-java-version
                  (expand-file-name "newer/pom.xml" root)))))
 
+(ert-deftest java-kit-test-maven-inheritance-honors-inherited-false-and-effective-version ()
+  (java-kit-test--with-temp-directory root
+    ;; A plugin marked non-inherited configures only its own module.
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<inherited>false</inherited><configuration><release>11"
+             "</release></configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "bare/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "prop/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent><properties>"
+             "<maven.compiler.release>21</maven.compiler.release>"
+             "</properties></project>"))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "bare/pom.xml" root)))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "prop/pom.xml" root))))
+    ;; A parent that inherits its groupId and version still has them.
+    (java-kit-test--write-file
+     (expand-file-name "gp/pom.xml" root)
+     "<project><groupId>g</groupId><artifactId>gp</artifactId><version>1</version></project>")
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version></parent><artifactId>mid</artifactId>"
+             "<properties><java.version>11</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/ok/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>mid</artifactId><version>1</version></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/stale/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>mid</artifactId><version>2</version></parent></project>")
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "gp/mid/ok/pom.xml" root))))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "gp/mid/stale/pom.xml" root)))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here

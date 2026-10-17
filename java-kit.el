@@ -426,8 +426,10 @@ SEEN tracks property names already visited."
            (cons property seen))))
     value))
 
-(defun java-kit--pom-plugin-configuration (content artifact-id)
-  "Return ARTIFACT-ID's plugin configuration from Maven POM CONTENT."
+(defun java-kit--pom-plugin-configuration (content artifact-id
+                                                   &optional inherited-only)
+  "Return ARTIFACT-ID's plugin configuration from Maven POM CONTENT.
+With INHERITED-ONLY, skip a plugin declared with `<inherited>false</inherited>'."
   (let ((position 0)
         configuration)
     (while (and (not configuration)
@@ -441,8 +443,11 @@ SEEN tracks property names already visited."
           (let ((next-position (match-end 0))
                 (plugin (substring content plugin-start plugin-end)))
             (setq position next-position)
-            (when (equal artifact-id
-                         (java-kit--pom-property plugin "artifactId"))
+            (when (and (equal artifact-id
+                              (java-kit--pom-property plugin "artifactId"))
+                       (not (and inherited-only
+                                 (equal "false" (java-kit--pom-property
+                                                 plugin "inherited")))))
               (when (string-match
                      "<configuration\\(?:[[:space:]][^>]*\\)?>" plugin)
                 (let ((configuration-start (match-end 0)))
@@ -465,18 +470,22 @@ SEEN tracks property names already visited."
                         "\\|modules\\|profiles\\|properties\\)[[:space:]>]")
                 header))))
 
+(defun java-kit--pom-coordinate (content tag)
+  "Return the effective TAG coordinate of POM CONTENT.
+A groupId or version the POM does not declare comes from its own parent."
+  (or (java-kit--pom-property (java-kit--pom-header content) tag)
+      (when (string-match "<parent>\\(\\(?:.\\|\n\\)*?\\)</parent>" content)
+        (java-kit--pom-property (match-string 1 content) tag))))
+
 (defun java-kit--pom-declares-p (content parent)
-  "Return non-nil when POM CONTENT has the coordinates PARENT refers to.
-The artifactId must match, and so must the groupId and version when CONTENT
-declares them rather than inheriting them."
-  (let ((header (java-kit--pom-header content)))
-    (and (equal (java-kit--pom-property header "artifactId")
-                (java-kit--pom-property parent "artifactId"))
-         (cl-every (lambda (tag)
-                     (let ((value (java-kit--pom-property header tag)))
-                       (or (null value)
-                           (equal value (java-kit--pom-property parent tag)))))
-                   '("groupId" "version")))))
+  "Return non-nil when POM CONTENT has the coordinates PARENT refers to."
+  (and (equal (java-kit--pom-property (java-kit--pom-header content)
+                                      "artifactId")
+              (java-kit--pom-property parent "artifactId"))
+       (cl-every (lambda (tag)
+                   (equal (java-kit--pom-coordinate content tag)
+                          (java-kit--pom-property parent tag)))
+                 '("groupId" "version"))))
 
 (defun java-kit--pom-parent-file (content pom-file)
   "Return the local parent POM that POM-FILE's CONTENT declares, if any.
@@ -516,11 +525,13 @@ at the path counts only when its coordinates match the declared parent."
     (nreverse chain)))
 
 (defun java-kit--pom-compiler-setting (chain key)
-  "Return KEY from the maven-compiler-plugin configuration in CHAIN."
+  "Return KEY from the maven-compiler-plugin configuration in CHAIN.
+Parent POMs contribute only plugins that are inherited."
   (seq-some (lambda (content)
               (when-let* ((configuration
                            (java-kit--pom-plugin-configuration
-                            content "maven-compiler-plugin")))
+                            content "maven-compiler-plugin"
+                            (not (eq content (car chain))))))
                 (java-kit--pom-property configuration key)))
             chain))
 
