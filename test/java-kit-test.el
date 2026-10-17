@@ -1172,6 +1172,33 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
         (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
           (kill-buffer buffer))))))
 
+(ert-deftest java-kit-test-app-continuation-is-skipped-when-requester-is-closed ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (requester (generate-new-buffer " requester"))
+           (other (generate-new-buffer " other"))
+           (context (java-kit-test--start-shell-service
+                     root "trap 'exit 0' TERM; while :; do sleep 0.05; done"
+                     'spring-boot))
+           ran)
+      (unwind-protect
+          (progn
+            (with-current-buffer requester
+              (java-kit-app--stop context 'spring-boot t
+                                  (lambda () (setq ran (current-buffer)))))
+            (kill-buffer requester)
+            (set-buffer other)
+            (should (java-kit-test--wait-for
+                     (lambda ()
+                       (null (java-kit-app--live-service context 'spring-boot)))))
+            (sleep-for 0.2)
+            (should-not ran))
+        (kill-buffer other)
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
+          (kill-buffer buffer))))))
+
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root
     (let* ((file (java-kit-test--write-file

@@ -366,13 +366,16 @@ context, and ON-SUCCESS runs after a successful finite process."
       service)))
 
 (defun java-kit-app--in-buffer (buffer function)
-  "Return a thunk calling FUNCTION in BUFFER, when that is still live.
+  "Return a thunk calling FUNCTION in BUFFER, the buffer that requested it.
 Process callbacks otherwise run in an arbitrary buffer, which would resolve
-buffer-local settings such as the project JDK for the wrong project."
+buffer-local settings such as the project JDK for the wrong project.  When
+BUFFER has been killed those settings are gone, so the thunk reports that
+and does nothing instead of falling back to whichever buffer is current."
   (lambda ()
-    (if (buffer-live-p buffer)
-        (with-current-buffer buffer (funcall function))
-      (funcall function))))
+    (cond
+     ((null buffer) (funcall function))
+     ((buffer-live-p buffer) (with-current-buffer buffer (funcall function)))
+     (t (message "java-kit: skipped a pending action; its source buffer was closed")))))
 
 (defun java-kit-app--finish-stop (process)
   "Run the continuations waiting for PROCESS to stop, once."
