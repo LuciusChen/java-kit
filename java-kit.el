@@ -408,16 +408,21 @@ Java project without Maven or Gradle metadata."
            content)
       (string-trim (match-string 1 content)))))
 
-(defun java-kit--pom-resolve-value (content value &optional seen)
-  "Resolve a Maven property expression VALUE in CONTENT.
+(defun java-kit--pom-chain-property (chain property)
+  "Return PROPERTY from the first POM content in CHAIN that declares it."
+  (seq-some (lambda (content) (java-kit--pom-property content property))
+            chain))
+
+(defun java-kit--pom-resolve-value (chain value &optional seen)
+  "Resolve a Maven property expression VALUE through the POM CHAIN.
 
 SEEN tracks property names already visited."
   (if (and value (string-match "^\\${\\([^}]+\\)}$" value))
       (let ((property (match-string 1 value)))
         (unless (member property seen)
           (java-kit--pom-resolve-value
-           content
-           (java-kit--pom-property content property)
+           chain
+           (java-kit--pom-chain-property chain property)
            (cons property seen))))
     value))
 
@@ -450,54 +455,89 @@ SEEN tracks property names already visited."
                                      configuration-end))))))))))
     configuration))
 
+(defun java-kit--pom-header (content)
+  "Return CONTENT's project coordinates, without its parent or later sections."
+  (let ((header (replace-regexp-in-string
+                 "<parent>\\(?:.\\|\n\\)*?</parent>" "" content)))
+    (substring header 0
+               (string-match
+                (concat "<\\(?:dependencies\\|dependencyManagement\\|build"
+                        "\\|modules\\|profiles\\|properties\\)[[:space:]>]")
+                header))))
+
+(defun java-kit--pom-declares-p (content parent)
+  "Return non-nil when POM CONTENT has the coordinates PARENT refers to.
+The artifactId must match, and so must the groupId when CONTENT declares one
+rather than inheriting it."
+  (let ((header (java-kit--pom-header content)))
+    (and (equal (java-kit--pom-property header "artifactId")
+                (java-kit--pom-property parent "artifactId"))
+         (let ((group (java-kit--pom-property header "groupId")))
+           (or (null group)
+               (equal group (java-kit--pom-property parent "groupId")))))))
+
 (defun java-kit--pom-parent-file (content pom-file)
   "Return the local parent POM that POM-FILE's CONTENT declares, if any.
-An empty `relativePath' means the parent is resolved from a repository."
+An empty `relativePath' means the parent comes from a repository, and a file
+at the path counts only when its coordinates match the declared parent."
   (when (string-match "<parent>\\(\\(?:.\\|\n\\)*?\\)</parent>" content)
     (let* ((parent (match-string 1 content))
-           (path (cond
-                  ((string-match "<relativePath[[:space:]]*/>" parent) nil)
-                  ((java-kit--pom-property parent "relativePath"))
-                  (t "../pom.xml")))
+           (empty (string-match-p
+                   "<relativePath[[:space:]]*\\(?:/>\\|>[[:space:]]*</relativePath>\\)"
+                   parent))
+           (path (unless empty
+                   (or (java-kit--pom-property parent "relativePath")
+                       "../pom.xml")))
            (file (and path
                       (expand-file-name path (file-name-directory pom-file)))))
+      (when (and file (file-directory-p file))
+        (setq file (expand-file-name "pom.xml" file)))
       (and file
            (file-readable-p file)
-           (if (file-directory-p file)
-               (expand-file-name "pom.xml" file)
-             file)))))
+           (with-temp-buffer
+             (insert-file-contents file)
+             (java-kit--pom-declares-p (buffer-string) parent))
+           file))))
 
-(defun java-kit--maven-java-version (pom-file &optional visited)
-  "Return the declared Java version from POM-FILE or its local parent POMs.
-VISITED lists POM files already read, which guards against parent cycles."
-  (when (and (file-readable-p pom-file)
-             (not (member (file-truename pom-file) visited)))
-    (with-temp-buffer
-      (insert-file-contents pom-file)
-      (let* ((content (buffer-string))
-             (compiler-configuration
-              (java-kit--pom-plugin-configuration
-               content "maven-compiler-plugin"))
-             (value (or (java-kit--pom-property
-                         content "maven.compiler.release")
-                        (java-kit--pom-property
-                         content "maven.compiler.source")
-                        (java-kit--pom-property
-                         content "maven.compiler.target")
-                        (and compiler-configuration
-                             (or (java-kit--pom-property
-                                  compiler-configuration "release")
-                                 (java-kit--pom-property
-                                  compiler-configuration "source")
-                                 (java-kit--pom-property
-                                  compiler-configuration "target")))
-                        (java-kit--pom-property content "java.version"))))
-        (or (java-kit--extract-java-major
-             (java-kit--pom-resolve-value content value))
-            (when-let* ((parent (java-kit--pom-parent-file
-                                 content pom-file)))
-              (java-kit--maven-java-version
-               parent (cons (file-truename pom-file) visited))))))))
+(defun java-kit--pom-chain (pom-file)
+  "Return the contents of POM-FILE followed by its local parent POMs."
+  (let (chain visited)
+    (while (and pom-file
+                (file-readable-p pom-file)
+                (not (member (file-truename pom-file) visited)))
+      (push (file-truename pom-file) visited)
+      (let ((content (with-temp-buffer
+                       (insert-file-contents pom-file)
+                       (buffer-string))))
+        (push content chain)
+        (setq pom-file (java-kit--pom-parent-file content pom-file))))
+    (nreverse chain)))
+
+(defun java-kit--pom-compiler-setting (chain key)
+  "Return KEY from the maven-compiler-plugin configuration in CHAIN."
+  (seq-some (lambda (content)
+              (when-let* ((configuration
+                           (java-kit--pom-plugin-configuration
+                            content "maven-compiler-plugin")))
+                (java-kit--pom-property configuration key)))
+            chain))
+
+(defun java-kit--maven-java-version (pom-file)
+  "Return the declared Java version from POM-FILE and its local parent POMs.
+Values declared in a module override those of its parents."
+  (when-let* ((chain (java-kit--pom-chain pom-file)))
+    (let ((value (or (java-kit--pom-chain-property
+                      chain "maven.compiler.release")
+                     (java-kit--pom-chain-property
+                      chain "maven.compiler.source")
+                     (java-kit--pom-chain-property
+                      chain "maven.compiler.target")
+                     (java-kit--pom-compiler-setting chain "release")
+                     (java-kit--pom-compiler-setting chain "source")
+                     (java-kit--pom-compiler-setting chain "target")
+                     (java-kit--pom-chain-property chain "java.version"))))
+      (java-kit--extract-java-major
+       (java-kit--pom-resolve-value chain value)))))
 
 (defun java-kit--gradle-java-version (module-root)
   "Return the declared Java version under MODULE-ROOT."

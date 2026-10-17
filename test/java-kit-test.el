@@ -1555,7 +1555,7 @@
 
 (ert-deftest java-kit-test-maven-java-version-comes-from-local-parent ()
   (java-kit-test--with-temp-directory root
-    (let ((parent-pom "<project><properties><maven.compiler.release>11</maven.compiler.release></properties></project>")
+    (let ((parent-pom "<project><artifactId>p</artifactId><properties><maven.compiler.release>11</maven.compiler.release></properties></project>")
           (child "<project><parent><artifactId>p</artifactId></parent></project>"))
       (java-kit-test--write-file (expand-file-name "pom.xml" root) parent-pom)
       (java-kit-test--write-file
@@ -1571,10 +1571,10 @@
       ;; A custom relativePath is honored, and cycles terminate.
       (java-kit-test--write-file
        (expand-file-name "d/pom.xml" root)
-       "<project><parent><relativePath>../e/pom.xml</relativePath></parent></project>")
+       "<project><artifactId>d</artifactId><parent><artifactId>e</artifactId><relativePath>../e/pom.xml</relativePath></parent></project>")
       (java-kit-test--write-file
        (expand-file-name "e/pom.xml" root)
-       "<project><parent><relativePath>../d/pom.xml</relativePath></parent></project>")
+       "<project><artifactId>e</artifactId><parent><artifactId>d</artifactId><relativePath>../d/pom.xml</relativePath></parent></project>")
       (should (equal "11" (java-kit--maven-java-version
                            (expand-file-name "a/pom.xml" root))))
       (should (equal "17" (java-kit--maven-java-version
@@ -1583,6 +1583,40 @@
                    (expand-file-name "c/pom.xml" root)))
       (should-not (java-kit--maven-java-version
                    (expand-file-name "d/pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-parent-inheritance-follows-maven-rules ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<properties><jdk.version>11</jdk.version>"
+             "<maven.compiler.release>${jdk.version}</maven.compiler.release>"
+             "</properties></project>"))
+    ;; A child property overrides the one a parent's expression refers to.
+    (java-kit-test--write-file
+     (expand-file-name "over/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>p</artifactId>"
+             "</parent><properties><jdk.version>21</jdk.version>"
+             "</properties></project>"))
+    ;; A readable ../pom.xml for a different artifact is not the parent.
+    (java-kit-test--write-file
+     (expand-file-name "other/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>missing</artifactId></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "wrong-group/pom.xml" root)
+     "<project><parent><groupId>h</groupId><artifactId>p</artifactId></parent></project>")
+    ;; An empty relativePath pair is the same as a self-closing one.
+    (java-kit-test--write-file
+     (expand-file-name "paired/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId><relativePath></relativePath></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "spaced/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId><relativePath> </relativePath></parent></project>")
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "over/pom.xml" root))))
+    (dolist (child '("other" "wrong-group" "paired" "spaced"))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name (concat child "/pom.xml") root))))))
 
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
