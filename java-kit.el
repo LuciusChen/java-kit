@@ -467,14 +467,16 @@ SEEN tracks property names already visited."
 
 (defun java-kit--pom-declares-p (content parent)
   "Return non-nil when POM CONTENT has the coordinates PARENT refers to.
-The artifactId must match, and so must the groupId when CONTENT declares one
-rather than inheriting it."
+The artifactId must match, and so must the groupId and version when CONTENT
+declares them rather than inheriting them."
   (let ((header (java-kit--pom-header content)))
     (and (equal (java-kit--pom-property header "artifactId")
                 (java-kit--pom-property parent "artifactId"))
-         (let ((group (java-kit--pom-property header "groupId")))
-           (or (null group)
-               (equal group (java-kit--pom-property parent "groupId")))))))
+         (cl-every (lambda (tag)
+                     (let ((value (java-kit--pom-property header tag)))
+                       (or (null value)
+                           (equal value (java-kit--pom-property parent tag)))))
+                   '("groupId" "version")))))
 
 (defun java-kit--pom-parent-file (content pom-file)
   "Return the local parent POM that POM-FILE's CONTENT declares, if any.
@@ -524,17 +526,15 @@ at the path counts only when its coordinates match the declared parent."
 
 (defun java-kit--maven-java-version (pom-file)
   "Return the declared Java version from POM-FILE and its local parent POMs.
-Values declared in a module override those of its parents."
+Values declared in a module override those of its parents.  Like Maven, an
+explicit compiler plugin setting beats the property of the same name, and
+`release' beats `source' and `target'."
   (when-let* ((chain (java-kit--pom-chain pom-file)))
-    (let ((value (or (java-kit--pom-chain-property
-                      chain "maven.compiler.release")
-                     (java-kit--pom-chain-property
-                      chain "maven.compiler.source")
-                     (java-kit--pom-chain-property
-                      chain "maven.compiler.target")
-                     (java-kit--pom-compiler-setting chain "release")
-                     (java-kit--pom-compiler-setting chain "source")
-                     (java-kit--pom-compiler-setting chain "target")
+    (let ((value (or (cl-loop for key in '("release" "source" "target")
+                              thereis
+                              (or (java-kit--pom-compiler-setting chain key)
+                                  (java-kit--pom-chain-property
+                                   chain (concat "maven.compiler." key))))
                      (java-kit--pom-chain-property chain "java.version"))))
       (java-kit--extract-java-major
        (java-kit--pom-resolve-value chain value)))))

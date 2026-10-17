@@ -1618,5 +1618,60 @@
       (should-not (java-kit--maven-java-version
                    (expand-file-name (concat child "/pom.xml") root))))))
 
+(ert-deftest java-kit-test-maven-explicit-compiler-setting-beats-property ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><properties>"
+             "<maven.compiler.release>11</maven.compiler.release>"
+             "</properties></project>"))
+    ;; Child plugin configuration overrides the parent's property.
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent><build>"
+             "<plugins><plugin><artifactId>maven-compiler-plugin</artifactId>"
+             "<configuration><release>21</release></configuration></plugin>"
+             "</plugins></build></project>"))
+    ;; The same holds inside one POM, and release beats source.
+    (java-kit-test--write-file
+     (expand-file-name "single/pom.xml" root)
+     (concat "<project><properties><maven.compiler.release>11"
+             "</maven.compiler.release><maven.compiler.source>8"
+             "</maven.compiler.source></properties><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<release>17</release></configuration></plugin></plugins>"
+             "</build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "release-first/pom.xml" root)
+     (concat "<project><properties><maven.compiler.release>11"
+             "</maven.compiler.release></properties><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<source>8</source></configuration></plugin></plugins>"
+             "</build></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))
+    (should (equal "17" (java-kit--maven-java-version
+                         (expand-file-name "single/pom.xml" root))))
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "release-first/pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-parent-version-must-match ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<version>1</version><properties><java.version>11"
+             "</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "same/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>1</version></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "newer/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>2</version></parent></project>")
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "same/pom.xml" root))))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "newer/pom.xml" root)))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here

@@ -109,7 +109,7 @@ For project processes, `java-kit` checks an interactive per-module choice, an ex
 1. `.java-version`
 2. `.tool-versions`
 3. `.sdkmanrc`
-4. Maven compiler properties or `maven-compiler-plugin` configuration, read from the module POM and then from local parent POMs through `<relativePath>` (default `../pom.xml`; an empty one, or a POM whose coordinates do not match the declared parent, ends the search), with module values overriding parent values
+4. Maven compiler properties or `maven-compiler-plugin` configuration, read from the module POM and then from local parent POMs through `<relativePath>` (default `../pom.xml`; an empty one, or a POM whose artifactId, groupId or version does not match the declared parent, ends the search), with module values overriding parent values and, as in Maven, explicit compiler plugin settings beating the `maven.compiler.*` properties and `release` beating `source` and `target`
 5. common Gradle toolchain and source-compatibility syntax
 
 On macOS, project versions are resolved through `/usr/libexec/java_home`; on Linux, installed homes under `/usr/lib/jvm` are considered. `M-x java-kit-select-project-jdk` records a choice only for the current build module, and `C-u M-x java-kit-select-project-jdk` clears it.
