@@ -299,7 +299,9 @@ may repeat the startup message."
       (java-kit-app--refresh-mode-line)
       (cond
        ((and success (java-kit-app--service-on-success service))
-        (funcall (java-kit-app--service-on-success service)))
+        (funcall (java-kit-app--in-buffer
+                  (java-kit-app--service-source-buffer service)
+                  (java-kit-app--service-on-success service))))
        ((and (not stopping) (not success))
         (java-kit-app--notify
          "java-kit process"
@@ -363,6 +365,15 @@ context, and ON-SUCCESS runs after a successful finite process."
       (display-buffer buffer)
       service)))
 
+(defun java-kit-app--in-buffer (buffer function)
+  "Return a thunk calling FUNCTION in BUFFER, when that is still live.
+Process callbacks otherwise run in an arbitrary buffer, which would resolve
+buffer-local settings such as the project JDK for the wrong project."
+  (lambda ()
+    (if (buffer-live-p buffer)
+        (with-current-buffer buffer (funcall function))
+      (funcall function))))
+
 (defun java-kit-app--finish-stop (process)
   "Run the continuations waiting for PROCESS to stop, once."
   (when-let* ((timer (process-get process 'java-kit-app-kill-timer)))
@@ -397,6 +408,7 @@ Ask the process to terminate, so the application can run its shutdown
 hooks, and kill it only after `java-kit-app-stop-timeout' seconds.  Call
 ON-STOPPED once the process has exited, or at once when none is running.
 When QUIET is non-nil, do not report that no matching process exists.
+ON-STOPPED runs in the buffer that requested the stop.
 Return non-nil when a live process is being stopped."
   (if-let* ((service (java-kit-app--live-service context kind))
             (process (java-kit-app--service-process service)))
@@ -416,7 +428,8 @@ Return non-nil when a live process is being stopped."
         (when on-stopped
           (process-put process 'java-kit-app-on-stopped
                        (append (process-get process 'java-kit-app-on-stopped)
-                               (list on-stopped))))
+                               (list (java-kit-app--in-buffer
+                                      (current-buffer) on-stopped)))))
         t)
     (unless quiet
       (message "No java-kit %s process is active for %s"

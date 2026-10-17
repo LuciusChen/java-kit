@@ -1135,6 +1135,43 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
           (should (equal (list (list '(:name "a") 'debug source)) runs)))
       (when (buffer-live-p source) (kill-buffer source)))))
 
+(ert-deftest java-kit-test-app-continuations-run-in-the-requesting-buffer ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (requester (generate-new-buffer " requester"))
+           (other (generate-new-buffer " other"))
+           (context (java-kit-test--start-shell-service
+                     root "trap 'exit 0' TERM; while :; do sleep 0.05; done"
+                     'spring-boot))
+           stop-buffer success-buffer)
+      (unwind-protect
+          (progn
+            (with-current-buffer requester
+              (java-kit-app--stop
+               context 'spring-boot t
+               (lambda () (setq stop-buffer (current-buffer)))))
+            (set-buffer other)
+            (should (java-kit-test--wait-for (lambda () stop-buffer)))
+            (should (eq requester stop-buffer))
+            ;; A finished build continues in the buffer that started it.
+            (with-current-buffer requester
+              (java-kit-app--start-process
+               (list :name "build" :module-root (file-name-as-directory root))
+               'spring-build '("true") 'building
+               :source-buffer requester
+               :on-success (lambda () (setq success-buffer (current-buffer)))))
+            (set-buffer other)
+            (should (java-kit-test--wait-for (lambda () success-buffer)))
+            (should (eq requester success-buffer)))
+        (kill-buffer requester)
+        (kill-buffer other)
+        (when-let* ((buffer (get-buffer "*java-kit spring-build:build*")))
+          (kill-buffer buffer))
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
+          (kill-buffer buffer))))))
+
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root
     (let* ((file (java-kit-test--write-file
