@@ -426,39 +426,58 @@ SEEN tracks property names already visited."
            (cons property seen))))
     value))
 
-(defun java-kit--pom-plugin-configuration (content artifact-id
-                                                   &optional inherited-only)
-  "Return ARTIFACT-ID's plugin configuration from Maven POM CONTENT.
-With INHERITED-ONLY, skip a plugin declared with `<inherited>false</inherited>'."
+(defun java-kit--pom-block (text tag)
+  "Return the content of the first TAG element in TEXT."
+  (when (string-match (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag) text)
+    (let ((start (match-end 0)))
+      (when-let* ((end (string-match (format "</%s[[:space:]]*>" tag)
+                                     text start)))
+        (substring text start end)))))
+
+(defun java-kit--pom-strip (text tag)
+  "Return TEXT without its TAG elements."
+  (let ((start-regexp (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag))
+        (end-regexp (format "</%s[[:space:]]*>" tag))
+        (position 0)
+        (result ""))
+    (while (string-match start-regexp text position)
+      (let* ((start (match-beginning 0))
+             (end (string-match end-regexp text (match-end 0))))
+        (setq result (concat result (substring text position start))
+              position (if end (match-end 0) (length text)))))
+    (concat result (substring text position))))
+
+(defun java-kit--pom-plugin-declaration (content artifact-id)
+  "Return (INHERITED . CONFIGURATION) for ARTIFACT-ID's plugin in CONTENT.
+INHERITED reflects the plugin's own `inherited' element, not that of its
+executions.  Return nil when CONTENT does not declare the plugin."
   (let ((position 0)
-        configuration)
-    (while (and (not configuration)
-                (string-match
-                 "<plugin\\(?:[[:space:]][^>]*\\)?>" content position))
+        found inherited configuration)
+    (while (string-match "<plugin\\(?:[[:space:]][^>]*\\)?>" content position)
       (let* ((plugin-start (match-end 0))
              (plugin-end
-              (string-match "</plugin[[:space:]]*>" content plugin-start)))
-        (if (not plugin-end)
-            (setq position (length content))
-          (let ((next-position (match-end 0))
-                (plugin (substring content plugin-start plugin-end)))
-            (setq position next-position)
-            (when (and (equal artifact-id
-                              (java-kit--pom-property plugin "artifactId"))
-                       (not (and inherited-only
-                                 (equal "false" (java-kit--pom-property
-                                                 plugin "inherited")))))
-              (when (string-match
-                     "<configuration\\(?:[[:space:]][^>]*\\)?>" plugin)
-                (let ((configuration-start (match-end 0)))
-                  (when-let* ((configuration-end
-                               (string-match
-                                "</configuration[[:space:]]*>"
-                                plugin configuration-start)))
-                    (setq configuration
-                          (substring plugin configuration-start
-                                     configuration-end))))))))))
-    configuration))
+              (string-match "</plugin[[:space:]]*>" content plugin-start))
+             (next-position (if plugin-end (match-end 0) (length content))))
+        (setq position next-position)
+        (when plugin-end
+          (let ((plugin (java-kit--pom-strip
+                         (java-kit--pom-strip
+                          (substring content plugin-start plugin-end)
+                          "executions")
+                         "dependencies")))
+            (when (equal artifact-id
+                         (java-kit--pom-property plugin "artifactId"))
+              (unless found
+                (setq found t
+                      inherited
+                      (not (equal "false"
+                                  (java-kit--pom-property
+                                   (java-kit--pom-strip plugin "configuration")
+                                   "inherited")))))
+              (unless configuration
+                (setq configuration
+                      (java-kit--pom-block plugin "configuration"))))))))
+    (and found (cons inherited configuration))))
 
 (defun java-kit--pom-header (content)
   "Return CONTENT's project coordinates, without its parent or later sections."
@@ -524,16 +543,28 @@ at the path counts only when its coordinates match the declared parent."
         (setq pom-file (java-kit--pom-parent-file content pom-file))))
     (nreverse chain)))
 
-(defun java-kit--pom-compiler-setting (chain key)
-  "Return KEY from the maven-compiler-plugin configuration in CHAIN.
-Parent POMs contribute only plugins that are inherited."
-  (seq-some (lambda (content)
-              (when-let* ((configuration
-                           (java-kit--pom-plugin-configuration
-                            content "maven-compiler-plugin"
-                            (not (eq content (car chain))))))
-                (java-kit--pom-property configuration key)))
-            chain))
+(defun java-kit--pom-compiler-configurations (chain)
+  "Return the maven-compiler-plugin configurations the module sees, nearest first.
+A parent's plugin marked `<inherited>false</inherited>' is not seen, and
+neither is anything declared further up, since Maven merges the plugin
+into that parent before inheriting it."
+  (let (configurations blocked)
+    (cl-loop for content in chain
+             for own = t then nil
+             until blocked
+             do (when-let* ((declaration (java-kit--pom-plugin-declaration
+                                          content "maven-compiler-plugin")))
+                  (if (or own (car declaration))
+                      (when (cdr declaration)
+                        (push (cdr declaration) configurations))
+                    (setq blocked t))))
+    (nreverse configurations)))
+
+(defun java-kit--pom-compiler-setting (configurations key)
+  "Return KEY from the first of the compiler plugin CONFIGURATIONS declaring it."
+  (seq-some (lambda (configuration)
+              (java-kit--pom-property configuration key))
+            configurations))
 
 (defun java-kit--maven-java-version (pom-file)
   "Return the declared Java version from POM-FILE and its local parent POMs.
@@ -541,9 +572,11 @@ Values declared in a module override those of its parents.  Like Maven, an
 explicit compiler plugin setting beats the property of the same name, and
 `release' beats `source' and `target'."
   (when-let* ((chain (java-kit--pom-chain pom-file)))
-    (let ((value (or (cl-loop for key in '("release" "source" "target")
+    (let* ((configurations (java-kit--pom-compiler-configurations chain))
+           (value (or (cl-loop for key in '("release" "source" "target")
                               thereis
-                              (or (java-kit--pom-compiler-setting chain key)
+                              (or (java-kit--pom-compiler-setting
+                                   configurations key)
                                   (java-kit--pom-chain-property
                                    chain (concat "maven.compiler." key))))
                      (java-kit--pom-chain-property chain "java.version"))))

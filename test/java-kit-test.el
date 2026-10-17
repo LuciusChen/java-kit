@@ -1714,5 +1714,42 @@
     (should-not (java-kit--maven-java-version
                  (expand-file-name "gp/mid/stale/pom.xml" root)))))
 
+(ert-deftest java-kit-test-maven-inherited-flag-applies-to-the-plugin-itself ()
+  (java-kit-test--with-temp-directory root
+    ;; An execution's own inherited flag does not disable the plugin.
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><executions>"
+             "<execution><id>x</id><inherited>false</inherited></execution>"
+             "</executions><configuration><release>21</release>"
+             "</configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent>"
+             "<properties><java.version>17</java.version></properties></project>"))
+    ;; A non-inherited plugin in the middle also cuts off its own ancestors.
+    (java-kit-test--write-file
+     (expand-file-name "gp/pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<release>11</release></configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version></parent><artifactId>mid</artifactId>"
+             "<build><plugins><plugin><artifactId>maven-compiler-plugin"
+             "</artifactId><inherited>false</inherited></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/kid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>mid</artifactId>"
+             "<version>1</version></parent><properties>"
+             "<maven.compiler.release>21</maven.compiler.release></properties></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "gp/mid/kid/pom.xml" root))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
