@@ -427,24 +427,30 @@ SEEN tracks property names already visited."
     value))
 
 (defun java-kit--pom-block (text tag)
-  "Return the content of the first TAG element in TEXT."
+  "Return the content of the first TAG element in TEXT.
+A self-closing element has no content."
   (when (string-match (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag) text)
-    (let ((start (match-end 0)))
-      (when-let* ((end (string-match (format "</%s[[:space:]]*>" tag)
-                                     text start)))
-        (substring text start end)))))
+    (unless (eq (aref text (- (match-end 0) 2)) ?/)
+      (let ((start (match-end 0)))
+        (when-let* ((end (string-match (format "</%s[[:space:]]*>" tag)
+                                       text start)))
+          (substring text start end))))))
 
 (defun java-kit--pom-strip (text tag)
-  "Return TEXT without its TAG elements."
+  "Return TEXT without its TAG elements, self-closing ones included."
   (let ((start-regexp (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag))
         (end-regexp (format "</%s[[:space:]]*>" tag))
         (position 0)
         (result ""))
     (while (string-match start-regexp text position)
       (let* ((start (match-beginning 0))
-             (end (string-match end-regexp text (match-end 0))))
+             (self-closing (eq (aref text (- (match-end 0) 2)) ?/))
+             (end (and (not self-closing)
+                       (string-match end-regexp text (match-end 0)))))
         (setq result (concat result (substring text position start))
-              position (if end (match-end 0) (length text)))))
+              position (cond (self-closing (match-end 0))
+                             (end (match-end 0))
+                             (t (length text))))))
     (concat result (substring text position))))
 
 (defun java-kit--pom-plugin-declaration (content artifact-id)
@@ -545,9 +551,10 @@ at the path counts only when its coordinates match the declared parent."
 
 (defun java-kit--pom-compiler-configurations (chain)
   "Return the compiler plugin configurations visible through POM CHAIN.
-The result is ordered nearest first.  A parent's plugin marked `<inherited>false</inherited>' is not seen, and
-neither is anything declared further up, since Maven merges the plugin
-into that parent before inheriting it."
+The result is ordered nearest first.  A parent's plugin marked
+`<inherited>false</inherited>' is not seen, and neither is anything
+declared further up, since Maven merges the plugin into that parent
+before inheriting it."
   (let (configurations blocked)
     (cl-loop for content in chain
              for own = t then nil

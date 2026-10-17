@@ -1751,5 +1751,18 @@
     (should (equal "21" (java-kit--maven-java-version
                          (expand-file-name "gp/mid/kid/pom.xml" root))))))
 
+(ert-deftest java-kit-test-maven-self-closing-elements-do-not-swallow-config ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<dependencies /><executions />"
+             "<configuration><release>21</release></configuration>"
+             "</plugin></plugins></build>"
+             "<properties><java.version>17</java.version></properties></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "pom.xml" root))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
