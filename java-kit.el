@@ -450,9 +450,28 @@ SEEN tracks property names already visited."
                                      configuration-end))))))))))
     configuration))
 
-(defun java-kit--maven-java-version (pom-file)
-  "Return the declared Java version from POM-FILE."
-  (when (file-readable-p pom-file)
+(defun java-kit--pom-parent-file (content pom-file)
+  "Return the local parent POM that POM-FILE's CONTENT declares, if any.
+An empty `relativePath' means the parent is resolved from a repository."
+  (when (string-match "<parent>\\(\\(?:.\\|\n\\)*?\\)</parent>" content)
+    (let* ((parent (match-string 1 content))
+           (path (cond
+                  ((string-match "<relativePath[[:space:]]*/>" parent) nil)
+                  ((java-kit--pom-property parent "relativePath"))
+                  (t "../pom.xml")))
+           (file (and path
+                      (expand-file-name path (file-name-directory pom-file)))))
+      (and file
+           (file-readable-p file)
+           (if (file-directory-p file)
+               (expand-file-name "pom.xml" file)
+             file)))))
+
+(defun java-kit--maven-java-version (pom-file &optional visited)
+  "Return the declared Java version from POM-FILE or its local parent POMs.
+VISITED lists POM files already read, which guards against parent cycles."
+  (when (and (file-readable-p pom-file)
+             (not (member (file-truename pom-file) visited)))
     (with-temp-buffer
       (insert-file-contents pom-file)
       (let* ((content (buffer-string))
@@ -473,8 +492,12 @@ SEEN tracks property names already visited."
                                  (java-kit--pom-property
                                   compiler-configuration "target")))
                         (java-kit--pom-property content "java.version"))))
-        (java-kit--extract-java-major
-         (java-kit--pom-resolve-value content value))))))
+        (or (java-kit--extract-java-major
+             (java-kit--pom-resolve-value content value))
+            (when-let* ((parent (java-kit--pom-parent-file
+                                 content pom-file)))
+              (java-kit--maven-java-version
+               parent (cons (file-truename pom-file) visited))))))))
 
 (defun java-kit--gradle-java-version (module-root)
   "Return the declared Java version under MODULE-ROOT."

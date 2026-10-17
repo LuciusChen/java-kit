@@ -1553,5 +1553,36 @@
                     (expand-file-name "demo" parent))
               captured)))))
 
+(ert-deftest java-kit-test-maven-java-version-comes-from-local-parent ()
+  (java-kit-test--with-temp-directory root
+    (let ((parent-pom "<project><properties><maven.compiler.release>11</maven.compiler.release></properties></project>")
+          (child "<project><parent><artifactId>p</artifactId></parent></project>"))
+      (java-kit-test--write-file (expand-file-name "pom.xml" root) parent-pom)
+      (java-kit-test--write-file
+       (expand-file-name "a/pom.xml" root) child)
+      ;; A child's own declaration wins over the parent's.
+      (java-kit-test--write-file
+       (expand-file-name "b/pom.xml" root)
+       "<project><parent/><properties><java.version>17</java.version></properties></project>")
+      ;; An empty relativePath means the parent is not local.
+      (java-kit-test--write-file
+       (expand-file-name "c/pom.xml" root)
+       "<project><parent><relativePath/></parent></project>")
+      ;; A custom relativePath is honored, and cycles terminate.
+      (java-kit-test--write-file
+       (expand-file-name "d/pom.xml" root)
+       "<project><parent><relativePath>../e/pom.xml</relativePath></parent></project>")
+      (java-kit-test--write-file
+       (expand-file-name "e/pom.xml" root)
+       "<project><parent><relativePath>../d/pom.xml</relativePath></parent></project>")
+      (should (equal "11" (java-kit--maven-java-version
+                           (expand-file-name "a/pom.xml" root))))
+      (should (equal "17" (java-kit--maven-java-version
+                           (expand-file-name "b/pom.xml" root))))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name "c/pom.xml" root)))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name "d/pom.xml" root))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
