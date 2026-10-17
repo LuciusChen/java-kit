@@ -544,8 +544,8 @@ at the path counts only when its coordinates match the declared parent."
     (nreverse chain)))
 
 (defun java-kit--pom-compiler-configurations (chain)
-  "Return the maven-compiler-plugin configurations the module sees, nearest first.
-A parent's plugin marked `<inherited>false</inherited>' is not seen, and
+  "Return the compiler plugin configurations visible through POM CHAIN.
+The result is ordered nearest first.  A parent's plugin marked `<inherited>false</inherited>' is not seen, and
 neither is anything declared further up, since Maven merges the plugin
 into that parent before inheriting it."
   (let (configurations blocked)
