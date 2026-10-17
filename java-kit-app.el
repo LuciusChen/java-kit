@@ -41,6 +41,14 @@
   :type 'boolean
   :group 'java-kit)
 
+(defcustom java-kit-app-stop-timeout 10
+  "Seconds a stopping service may take to exit before it is killed.
+
+Stopping asks the process to terminate so that the application runs its
+shutdown hooks.  Only a process still running after this time is killed."
+  :type 'number
+  :group 'java-kit)
+
 (defcustom java-kit-spring-boot-port 8080
   "Expected Spring Boot HTTP port displayed in status messages.
 
@@ -295,7 +303,8 @@ receiving the project context and returning a string or nil."
          "java-kit process"
          (format "%s failed: %s"
                  (java-kit-app--service-kind service)
-                 (string-trim event))))))))
+                 (string-trim event)))))
+      (java-kit-app--finish-stop process))))
 
 (cl-defun java-kit-app--start-process
     (context kind command status
@@ -352,24 +361,67 @@ context, and ON-SUCCESS runs after a successful finite process."
       (display-buffer buffer)
       service)))
 
-(defun java-kit-app--stop (context kind &optional quiet)
+(defun java-kit-app--finish-stop (process)
+  "Run the continuations waiting for PROCESS to stop, once."
+  (when-let* ((timer (process-get process 'java-kit-app-kill-timer)))
+    (cancel-timer timer)
+    (process-put process 'java-kit-app-kill-timer nil))
+  (let ((callbacks (process-get process 'java-kit-app-on-stopped)))
+    (process-put process 'java-kit-app-on-stopped nil)
+    (dolist (callback callbacks)
+      (condition-case error-data
+          (funcall callback)
+        (error (message "java-kit stop continuation failed: %s"
+                        (error-message-string error-data)))))))
+
+(defun java-kit-app--kill (service)
+  "Kill SERVICE's process, which did not exit after being asked to."
+  (let ((process (java-kit-app--service-process service)))
+    (when (process-live-p process)
+      (message "java-kit: %s did not exit within %s seconds; killing it"
+               (java-kit-app--service-kind service)
+               java-kit-app-stop-timeout)
+      (delete-process process))
+    (when (eq service (gethash (java-kit-app--service-key service)
+                               java-kit-app--services))
+      (remhash (java-kit-app--service-key service) java-kit-app--services))
+    (java-kit-app--refresh-mode-line)
+    (java-kit-app--finish-stop process)))
+
+(defun java-kit-app--stop (context kind &optional quiet on-stopped)
   "Stop java-kit's tracked KIND process for CONTEXT.
 
-When QUIET is non-nil, do not report that no matching process exists."
+Ask the process to terminate, so the application can run its shutdown
+hooks, and kill it only after `java-kit-app-stop-timeout' seconds.  Call
+ON-STOPPED once the process has exited, or at once when none is running.
+When QUIET is non-nil, do not report that no matching process exists.
+Return non-nil when a live process is being stopped."
   (if-let* ((service (java-kit-app--live-service context kind))
             (process (java-kit-app--service-process service)))
       (progn
-        (process-put process 'java-kit-app-stopping t)
-        (delete-process process)
-        (remhash (java-kit-app--service-key service) java-kit-app--services)
-        (java-kit-app--refresh-mode-line)
-        (message "Stopped %s for %s" kind (plist-get context :name))
+        (unless (process-get process 'java-kit-app-stopping)
+          (process-put process 'java-kit-app-stopping t)
+          (process-put process 'java-kit-app-on-stopped
+                       (list (lambda ()
+                               (message "Stopped %s for %s"
+                                        kind (plist-get context :name)))))
+          (process-put process 'java-kit-app-kill-timer
+                       (run-at-time java-kit-app-stop-timeout nil
+                                    #'java-kit-app--kill service))
+          (setf (java-kit-app--service-status service) 'stopping)
+          (java-kit-app--refresh-mode-line)
+          (signal-process process 'SIGTERM))
+        (when on-stopped
+          (process-put process 'java-kit-app-on-stopped
+                       (append (process-get process 'java-kit-app-on-stopped)
+                               (list on-stopped))))
         t)
-    (progn
-      (unless quiet
-        (message "No java-kit %s process is active for %s"
-                 kind (plist-get context :name)))
-      nil)))
+    (unless quiet
+      (message "No java-kit %s process is active for %s"
+               kind (plist-get context :name)))
+    (when on-stopped
+      (funcall on-stopped))
+    nil))
 
 (defun java-kit-app--build-arguments (context purpose)
   "Return build arguments for CONTEXT and PURPOSE."
@@ -469,9 +521,12 @@ With prefix argument DEBUG, enable JDWP on
 
 With prefix argument DEBUG, enable JDWP."
   (interactive "P")
-  (let ((context (java-kit-project-context)))
-    (java-kit-app--stop context 'spring-boot t)
-    (java-kit-spring-boot-run debug)))
+  (let ((source (current-buffer)))
+    (java-kit-app--stop
+     (java-kit-project-context) 'spring-boot t
+     (lambda ()
+       (with-current-buffer (if (buffer-live-p source) source (current-buffer))
+         (java-kit-spring-boot-run debug))))))
 
 (defun java-kit-app--tomcat-home-p (directory)
   "Return non-nil when DIRECTORY contains a Tomcat launcher."
@@ -752,16 +807,23 @@ With prefix argument DEBUG, start Tomcat in JPDA mode."
      :source-buffer source-buffer
      :on-success
      (lambda ()
-       (java-kit-app--stop context 'tomcat t)
-       (when-let* ((conflict
-                    (java-kit-app--tomcat-conflict
-                     base java-kit-tomcat-port)))
-         (java-kit-app--stop
-          (java-kit-app--service-context conflict) 'tomcat t))
-       (let ((destination (java-kit-app--deploy-war context base)))
-         (message "Deployed %s" destination))
-       (java-kit-app--start-tomcat
-        context home base debug source-buffer)))))
+       (java-kit-app--stop
+        context 'tomcat t
+        (lambda ()
+          (let ((conflict (java-kit-app--tomcat-conflict
+                           base java-kit-tomcat-port))
+                (redeploy
+                 (lambda ()
+                   (let ((destination
+                          (java-kit-app--deploy-war context base)))
+                     (message "Deployed %s" destination))
+                   (java-kit-app--start-tomcat
+                    context home base debug source-buffer))))
+            (if conflict
+                (java-kit-app--stop
+                 (java-kit-app--service-context conflict) 'tomcat t
+                 redeploy)
+              (funcall redeploy)))))))))
 
 ;;;###autoload
 (defun java-kit-tomcat-stop ()

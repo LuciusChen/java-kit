@@ -777,8 +777,9 @@
               ((symbol-function 'java-kit-app--tomcat-conflict)
                (lambda (_base _port) service))
               ((symbol-function 'java-kit-app--stop)
-               (lambda (stopped-context kind &optional quiet)
-                 (push (list stopped-context kind quiet) stopped)))
+               (lambda (stopped-context kind &optional quiet on-stopped)
+                 (push (list stopped-context kind quiet) stopped)
+                 (funcall on-stopped)))
               ((symbol-function 'java-kit-app--deploy-war)
                (lambda (_context _base) "/instances/second/webapps/app.war"))
               ((symbol-function 'java-kit-app--start-tomcat) #'ignore))
@@ -899,7 +900,7 @@
            (second-key (java-kit-app--key second-context 'spring-boot))
            (java-kit-app--services (make-hash-table :test #'equal))
            (global-mode-string nil)
-           deleted)
+           signaled)
       (puthash first-key
                (java-kit-app--service-create
                 :key first-key :kind 'spring-boot :context first-context
@@ -915,16 +916,115 @@
                 ((symbol-function 'process-live-p)
                  (lambda (process)
                    (memq process '(first-process second-process))))
-                ((symbol-function 'process-put)
-                 (lambda (&rest _arguments) nil))
-                ((symbol-function 'delete-process)
-                 (lambda (process) (setq deleted process)))
+                ((symbol-function 'process-put) #'ignore)
+                ((symbol-function 'process-get) #'ignore)
+                ((symbol-function 'run-at-time) #'ignore)
+                ((symbol-function 'signal-process)
+                 (lambda (process signal) (push (cons process signal) signaled)))
                 ((symbol-function 'force-mode-line-update)
                  (lambda (&optional _all) nil)))
         (java-kit-spring-boot-stop))
-      (should (eq 'first-process deleted))
-      (should-not (gethash first-key java-kit-app--services))
+      (should (equal '((first-process . SIGTERM)) signaled))
+      (should (gethash first-key java-kit-app--services))
       (should (gethash second-key java-kit-app--services)))))
+
+(defun java-kit-test--start-shell-service (root script kind)
+  "Start sh SCRIPT as a KIND service under ROOT and wait until it is up."
+  (let* ((module (file-name-as-directory (expand-file-name "app" root)))
+         (context (list :name "sample" :module-root module))
+         (up (expand-file-name "up" root)))
+    (make-directory module t)
+    (java-kit-app--start-process
+     context kind
+     (list "sh" "-c" (format "echo up > %s; %s"
+                             (shell-quote-argument up) script))
+     'running)
+    (let ((deadline (+ (float-time) 5)))
+      (while (and (not (file-exists-p up)) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (file-exists-p up))
+    context))
+
+(defun java-kit-test--wait-for (predicate)
+  "Wait up to five seconds for PREDICATE to become non-nil."
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
+
+(ert-deftest java-kit-test-app-stop-lets-the-process-shut-down ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (marker (expand-file-name "bye" root))
+           (context (java-kit-test--start-shell-service
+                     root
+                     (format "trap 'echo bye > %s; exit 0' TERM; while :; do sleep 0.05; done"
+                             (shell-quote-argument marker))
+                     'spring-boot))
+           (java-kit-app-stop-timeout 5)
+           order)
+      (unwind-protect
+          (progn
+            (should (java-kit-app--stop
+                     context 'spring-boot t (lambda () (push 'first order))))
+            ;; A second request joins the stop instead of signalling again.
+            (should (java-kit-app--stop
+                     context 'spring-boot t (lambda () (push 'second order))))
+            (should (eq 'stopping
+                        (java-kit-app--service-status
+                         (java-kit-app--live-service context 'spring-boot))))
+            (should (java-kit-test--wait-for (lambda () (= 2 (length order)))))
+            (should (equal '(first second) (nreverse order)))
+            (should (file-exists-p marker))
+            (should-not (java-kit-app--live-service context 'spring-boot)))
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:sample*")))
+          (kill-buffer buffer))))))
+
+(ert-deftest java-kit-test-app-stop-kills-a-process-that-ignores-termination ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (context (java-kit-test--start-shell-service
+                     root "trap '' TERM; while :; do sleep 0.05; done"
+                     'tomcat))
+           (process (java-kit-app--service-process
+                     (java-kit-app--live-service context 'tomcat)))
+           (java-kit-app-stop-timeout 0.3)
+           stopped)
+      (unwind-protect
+          (progn
+            (should (java-kit-app--stop
+                     context 'tomcat t (lambda () (setq stopped t))))
+            (should (java-kit-test--wait-for (lambda () stopped)))
+            (should-not (process-live-p process))
+            (should-not (java-kit-app--live-service context 'tomcat)))
+        (when-let* ((buffer (get-buffer "*java-kit tomcat:sample*")))
+          (kill-buffer buffer))))))
+
+(ert-deftest java-kit-test-app-stop-continues-at-once-without-a-process ()
+  (let ((java-kit-app--services (make-hash-table :test #'equal))
+        continued)
+    (should-not (java-kit-app--stop
+                 (list :name "sample" :module-root "/none/") 'tomcat t
+                 (lambda () (setq continued t))))
+    (should continued)))
+
+(ert-deftest java-kit-test-spring-boot-restart-starts-after-the-old-process-exits ()
+  (let (steps)
+    (cl-letf (((symbol-function 'java-kit-project-context)
+               (lambda (&optional _directory) '(:name "sample")))
+              ((symbol-function 'java-kit-app--stop)
+               (lambda (_context _kind &optional _quiet on-stopped)
+                 (push 'stop steps)
+                 (push on-stopped steps)))
+              ((symbol-function 'java-kit-spring-boot-run)
+               (lambda (&optional debug) (push (list 'run debug) steps))))
+      (java-kit-spring-boot-restart 'debug)
+      (should (equal '(stop) (cl-remove-if #'functionp steps)))
+      ;; Nothing runs until the stop completes.
+      (funcall (cl-find-if #'functionp steps))
+      (should (equal '(run debug) (car steps))))))
 
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root
