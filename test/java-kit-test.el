@@ -16,6 +16,9 @@
 (require 'java-kit-install)
 (require 'java-kit-new)
 
+;; The tests bind this Dape variable dynamically even when Dape is not loaded.
+(defvar dape-request-timeout)
+
 (defmacro java-kit-test--with-temp-directory (variable &rest body)
   "Bind VARIABLE to a temporary directory while evaluating BODY."
   (declare (indent 1) (debug (symbolp body)))
