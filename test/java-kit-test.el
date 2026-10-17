@@ -1764,5 +1764,18 @@
     (should (equal "21" (java-kit--maven-java-version
                          (expand-file-name "pom.xml" root))))))
 
+(ert-deftest java-kit-test-maven-commented-out-settings-are-ignored ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><build><plugins><!-- <plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<configuration><release>8</release></configuration></plugin> -->"
+             "</plugins></build><properties>"
+             "<!-- <maven.compiler.release>11</maven.compiler.release> -->"
+             "<java.version>17</java.version></properties></project>"))
+    (should (equal "17" (java-kit--maven-java-version
+                         (expand-file-name "pom.xml" root))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here

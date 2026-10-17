@@ -536,7 +536,8 @@ at the path counts only when its coordinates match the declared parent."
            file))))
 
 (defun java-kit--pom-chain (pom-file)
-  "Return the contents of POM-FILE followed by its local parent POMs."
+  "Return the contents of POM-FILE followed by its local parent POMs.
+XML comments are removed, so commented-out settings are never read."
   (let (chain visited)
     (while (and pom-file
                 (file-readable-p pom-file)
@@ -544,6 +545,12 @@ at the path counts only when its coordinates match the declared parent."
       (push (file-truename pom-file) visited)
       (let ((content (with-temp-buffer
                        (insert-file-contents pom-file)
+                       (goto-char (point-min))
+                       (while (re-search-forward "<!--" nil t)
+                         (let ((start (match-beginning 0)))
+                           (delete-region
+                            start
+                            (if (search-forward "-->" nil t) (point) (point-max)))))
                        (buffer-string))))
         (push content chain)
         (setq pom-file (java-kit--pom-parent-file content pom-file))))
