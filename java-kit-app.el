@@ -452,21 +452,36 @@ Return non-nil when a live process is being stopped."
      (`(gradle . tomcat) '("war" "-x" "test"))
      (_ (user-error "Unsupported build system for %s" purpose)))))
 
-(defun java-kit-app--newest-artifact (directory regexp excluded-regexp)
-  "Return the newest file in DIRECTORY matching REGEXP but not EXCLUDED-REGEXP."
+(defun java-kit-app--newest-artifact
+    (directory regexp excluded-regexp &optional predicate)
+  "Return the newest file in DIRECTORY matching REGEXP but not EXCLUDED-REGEXP.
+When PREDICATE is non-nil, the file must also satisfy it."
   (when (file-directory-p directory)
     (car
      (sort
       (seq-remove
        (lambda (file)
-         (and excluded-regexp
-              (string-match-p excluded-regexp
-                              (file-name-nondirectory file))))
+         (or (and excluded-regexp
+                  (string-match-p excluded-regexp
+                                  (file-name-nondirectory file)))
+             (and predicate (not (funcall predicate file)))))
        (directory-files directory t regexp))
       (lambda (first second)
         (time-less-p
          (file-attribute-modification-time (file-attributes second))
          (file-attribute-modification-time (file-attributes first))))))))
+
+(defun java-kit-app--executable-jar-p (jar)
+  "Return non-nil unless JAR's manifest is readable and has no `Main-Class'.
+Sources, javadoc and test JARs carry no launcher.  Their names cannot be
+trusted to tell them apart, since a project may call its application
+`service-tests'."
+  (with-temp-buffer
+    (or (not (executable-find "unzip"))
+        (not (zerop (call-process "unzip" nil t nil "-p" jar
+                                  "META-INF/MANIFEST.MF")))
+        (progn (goto-char (point-min))
+               (re-search-forward "^Main-Class:" nil t)))))
 
 (defun java-kit-app--spring-boot-jar (context)
   "Return the built Spring Boot JAR for CONTEXT."
@@ -476,9 +491,8 @@ Return non-nil when a live process is being stopped."
                       ('maven (expand-file-name "target" root))
                       ('gradle (expand-file-name "build/libs" root))))
          (jar (java-kit-app--newest-artifact
-               directory "\\.jar\\'"
-               (concat "\\(?:-plain\\|-original\\|-sources\\|-javadoc"
-                       "\\|-tests\\|-test-sources\\)\\.jar\\'"))))
+               directory "\\.jar\\'" "\\(?:-plain\\|-original\\)\\.jar\\'"
+               #'java-kit-app--executable-jar-p)))
     (or jar
         (user-error "No runnable Spring Boot JAR found under %s" directory))))
 
