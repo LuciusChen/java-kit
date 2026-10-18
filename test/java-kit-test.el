@@ -16,6 +16,9 @@
 (require 'java-kit-install)
 (require 'java-kit-new)
 
+;; The tests bind this Dape variable dynamically even when Dape is not loaded.
+(defvar dape-request-timeout)
+
 (defmacro java-kit-test--with-temp-directory (variable &rest body)
   "Bind VARIABLE to a temporary directory while evaluating BODY."
   (declare (indent 1) (debug (symbolp body)))
@@ -775,18 +778,18 @@
                  (setq callback
                        (plist-get (nthcdr 4 arguments) :on-success))))
               ((symbol-function 'java-kit-app--tomcat-conflict)
-               (lambda (_base _port) service))
+               (lambda (_base _port) (prog1 service (setq service nil))))
               ((symbol-function 'java-kit-app--stop)
-               (lambda (stopped-context kind &optional quiet)
-                 (push (list stopped-context kind quiet) stopped)))
+               (lambda (stopped-context kind &optional quiet on-stopped)
+                 (push (list stopped-context kind quiet) stopped)
+                 (funcall on-stopped)))
               ((symbol-function 'java-kit-app--deploy-war)
                (lambda (_context _base) "/instances/second/webapps/app.war"))
               ((symbol-function 'java-kit-app--start-tomcat) #'ignore))
       (java-kit-tomcat-deploy)
       (should callback)
       (funcall callback))
-    (should (equal (list (list current-context 'tomcat t)
-                         (list owner-context 'tomcat t))
+    (should (equal (list (list owner-context 'tomcat t))
                    (nreverse stopped)))))
 
 (ert-deftest java-kit-test-tomcat-deploy-selects-newest-war ()
@@ -899,7 +902,7 @@
            (second-key (java-kit-app--key second-context 'spring-boot))
            (java-kit-app--services (make-hash-table :test #'equal))
            (global-mode-string nil)
-           deleted)
+           signaled)
       (puthash first-key
                (java-kit-app--service-create
                 :key first-key :kind 'spring-boot :context first-context
@@ -915,16 +918,289 @@
                 ((symbol-function 'process-live-p)
                  (lambda (process)
                    (memq process '(first-process second-process))))
-                ((symbol-function 'process-put)
-                 (lambda (&rest _arguments) nil))
-                ((symbol-function 'delete-process)
-                 (lambda (process) (setq deleted process)))
+                ((symbol-function 'process-put) #'ignore)
+                ((symbol-function 'process-get) #'ignore)
+                ((symbol-function 'run-at-time) #'ignore)
+                ((symbol-function 'signal-process)
+                 (lambda (process signal) (push (cons process signal) signaled)))
                 ((symbol-function 'force-mode-line-update)
                  (lambda (&optional _all) nil)))
         (java-kit-spring-boot-stop))
-      (should (eq 'first-process deleted))
-      (should-not (gethash first-key java-kit-app--services))
+      (should (equal '((first-process . SIGTERM)) signaled))
+      (should (gethash first-key java-kit-app--services))
       (should (gethash second-key java-kit-app--services)))))
+
+(defun java-kit-test--start-shell-service (root script kind &rest keys)
+  "Start sh SCRIPT as a KIND service under ROOT and wait until it is up.
+KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
+  (let* ((dir (or (plist-get keys :dir) "app"))
+         (module (file-name-as-directory (expand-file-name dir root)))
+         (context (list :name dir :module-root module))
+         (up (expand-file-name (concat dir "-up") root)))
+    (make-directory module t)
+    (apply #'java-kit-app--start-process
+           context kind
+           (list "sh" "-c" (format "echo up > %s; %s"
+                                   (shell-quote-argument up) script))
+           'running
+           (cl-loop for (key value) on keys by #'cddr
+                    unless (eq key :dir) append (list key value)))
+    (let ((deadline (+ (float-time) 5)))
+      (while (and (not (file-exists-p up)) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (file-exists-p up))
+    context))
+
+(defun java-kit-test--wait-for (predicate)
+  "Wait up to five seconds for PREDICATE to become non-nil."
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
+
+(ert-deftest java-kit-test-app-stop-lets-the-process-shut-down ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (marker (expand-file-name "bye" root))
+           (context (java-kit-test--start-shell-service
+                     root
+                     (format "trap 'echo bye > %s; exit 0' TERM; while :; do sleep 0.05; done"
+                             (shell-quote-argument marker))
+                     'spring-boot))
+           (java-kit-app-stop-timeout 5)
+           order)
+      (unwind-protect
+          (progn
+            (should (java-kit-app--stop
+                     context 'spring-boot t (lambda () (push 'first order))))
+            ;; A second request joins the stop instead of signalling again.
+            (should (java-kit-app--stop
+                     context 'spring-boot t (lambda () (push 'second order))))
+            (should (eq 'stopping
+                        (java-kit-app--service-status
+                         (java-kit-app--live-service context 'spring-boot))))
+            (should (java-kit-test--wait-for (lambda () (= 2 (length order)))))
+            (should (equal '(first second) (nreverse order)))
+            (should (file-exists-p marker))
+            (should-not (java-kit-app--live-service context 'spring-boot)))
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
+          (kill-buffer buffer))))))
+
+(ert-deftest java-kit-test-app-stop-kills-a-process-that-ignores-termination ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (context (java-kit-test--start-shell-service
+                     root "trap '' TERM; while :; do sleep 0.05; done"
+                     'tomcat))
+           (process (java-kit-app--service-process
+                     (java-kit-app--live-service context 'tomcat)))
+           (java-kit-app-stop-timeout 0.3)
+           stopped)
+      (unwind-protect
+          (progn
+            (should (java-kit-app--stop
+                     context 'tomcat t (lambda () (setq stopped t))))
+            (should (java-kit-test--wait-for (lambda () stopped)))
+            (should-not (process-live-p process))
+            (should-not (java-kit-app--live-service context 'tomcat)))
+        (when-let* ((buffer (get-buffer "*java-kit tomcat:app*")))
+          (kill-buffer buffer))))))
+
+(ert-deftest java-kit-test-app-stop-continues-at-once-without-a-process ()
+  (let ((java-kit-app--services (make-hash-table :test #'equal))
+        continued)
+    (should-not (java-kit-app--stop
+                 (list :name "sample" :module-root "/none/") 'tomcat t
+                 (lambda () (setq continued t))))
+    (should continued)))
+
+(ert-deftest java-kit-test-app-output-while-stopping-does-not-mark-ready ()
+  (let ((service (java-kit-app--service-create
+                  :kind 'spring-boot :status 'stopping :debug t
+                  :port 8080 :debug-port 5005
+                  :ready-regexp "Started .* in"
+                  :output-tail "Started App in 1.2 seconds\n"))
+        notified attached)
+    (cl-letf (((symbol-function 'compilation-filter) #'ignore)
+              ((symbol-function 'java-kit-app--refresh-mode-line) #'ignore)
+              ((symbol-function 'java-kit-app--notify)
+               (lambda (&rest _) (setq notified t)))
+              ((symbol-function 'java-kit-app--auto-attach)
+               (lambda (_service) (setq attached t))))
+      (java-kit-app--process-filter service nil "Closing connection pool\n")
+      (should (eq 'stopping (java-kit-app--service-status service)))
+      (should-not (or notified attached))
+      (setf (java-kit-app--service-status service) 'starting)
+      (java-kit-app--process-filter service nil "Closing connection pool\n")
+      (should (eq 'running (java-kit-app--service-status service)))
+      (should (and notified attached)))))
+
+(ert-deftest java-kit-test-tomcat-deploys-queued-behind-a-stop-run-one-at-a-time ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (java-kit-tomcat-port 8080)
+           (base "/instances/shared")
+           (current nil)
+           (builds nil)
+           (failures nil)
+           (start-process (symbol-function 'java-kit-app--start-process))
+           (quick-stop "trap 'exit 0' TERM; while :; do sleep 0.05; done")
+           (contexts
+            (mapcar (lambda (dir)
+                      (list :name dir :build-system 'maven
+                            :module-root (file-name-as-directory
+                                          (expand-file-name dir root))))
+                    '("a" "b" "c"))))
+      ;; A holds the shared port and takes a moment to stop.
+      (java-kit-test--start-shell-service
+       root "trap 'sleep 0.4; exit 0' TERM; while :; do sleep 0.05; done"
+       'tomcat :dir "a" :base base :port 8080)
+      (unwind-protect
+          (cl-letf (((symbol-function 'java-kit-project-context)
+                     (lambda (&optional _directory) current))
+                    ((symbol-function 'java-kit-app--tomcat-home)
+                     (lambda (_context) "/tomcat"))
+                    ((symbol-function 'java-kit-app--tomcat-base)
+                     (lambda (_context _home) base))
+                    ((symbol-function 'java-kit-app--build-arguments)
+                     (lambda (_context _purpose) '("mvn" "package")))
+                    ((symbol-function 'java-kit-app--start-process)
+                     (lambda (&rest arguments)
+                       (if (eq 'tomcat-build (nth 1 arguments))
+                           (push (plist-get (nthcdr 4 arguments) :on-success)
+                                 builds)
+                         (apply start-process arguments))))
+                    ((symbol-function 'java-kit-app--deploy-war)
+                     (lambda (_context _base) "war"))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest arguments)
+                       (when (string-match-p "failed" format-string)
+                         (push (apply #'format format-string arguments)
+                               failures))))
+                    ;; Like the real function, refuse a busy base or port.
+                    ((symbol-function 'java-kit-app--start-tomcat)
+                     (lambda (context _home base _debug _source)
+                       (when (java-kit-app--tomcat-conflict
+                              base java-kit-tomcat-port)
+                         (user-error "Port in use"))
+                       (java-kit-test--start-shell-service
+                        root quick-stop 'tomcat
+                        :dir (plist-get context :name)
+                        :base base :port 8080))))
+            (dolist (context (cdr contexts))
+              (setq current context)
+              (java-kit-tomcat-deploy))
+            (setq builds (nreverse builds))
+            (mapc #'funcall builds)
+            (let ((c (nth 2 contexts)))
+              (should (java-kit-test--wait-for
+                       (lambda ()
+                         (and (java-kit-app--live-service c 'tomcat)
+                              (not (java-kit-app--live-service
+                                    (nth 1 contexts) 'tomcat))
+                              (not (java-kit-app--live-service
+                                    (nth 0 contexts) 'tomcat)))))))
+            (should-not failures))
+        (maphash (lambda (_key service)
+                   (when (process-live-p (java-kit-app--service-process service))
+                     (delete-process (java-kit-app--service-process service))))
+                 java-kit-app--services)
+        (dolist (name '("a" "b" "c"))
+          (when-let* ((buffer (get-buffer (format "*java-kit tomcat:%s*" name))))
+            (kill-buffer buffer)))))))
+
+(ert-deftest java-kit-test-spring-boot-restart-keeps-the-requested-project ()
+  (let ((context '(:name "a"))
+        (source (generate-new-buffer " restart-source"))
+        continuation runs)
+    (unwind-protect
+        (cl-letf (((symbol-function 'java-kit-project-context)
+                   (lambda (&optional _directory) context))
+                  ((symbol-function 'java-kit-app--stop)
+                   (lambda (_context _kind &optional _quiet on-stopped)
+                     (setq continuation on-stopped)))
+                  ((symbol-function 'java-kit-app--run-spring)
+                   (lambda (run-context debug run-source)
+                     (push (list run-context debug run-source) runs))))
+          (with-current-buffer source
+            (java-kit-spring-boot-restart 'debug))
+          ;; Nothing runs until the old process has exited.
+          (should-not runs)
+          ;; Meanwhile the source buffer is gone and another project is
+          ;; current; the restart still targets the project it was asked for.
+          (kill-buffer source)
+          (setq context '(:name "b"))
+          (funcall continuation)
+          (should (equal (list (list '(:name "a") 'debug source)) runs)))
+      (when (buffer-live-p source) (kill-buffer source)))))
+
+(ert-deftest java-kit-test-app-continuations-run-in-the-requesting-buffer ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (requester (generate-new-buffer " requester"))
+           (other (generate-new-buffer " other"))
+           (context (java-kit-test--start-shell-service
+                     root "trap 'exit 0' TERM; while :; do sleep 0.05; done"
+                     'spring-boot))
+           stop-buffer success-buffer)
+      (unwind-protect
+          (progn
+            (with-current-buffer requester
+              (java-kit-app--stop
+               context 'spring-boot t
+               (lambda () (setq stop-buffer (current-buffer)))))
+            (set-buffer other)
+            (should (java-kit-test--wait-for (lambda () stop-buffer)))
+            (should (eq requester stop-buffer))
+            ;; A finished build continues in the buffer that started it.
+            (with-current-buffer requester
+              (java-kit-app--start-process
+               (list :name "build" :module-root (file-name-as-directory root))
+               'spring-build '("true") 'building
+               :source-buffer requester
+               :on-success (lambda () (setq success-buffer (current-buffer)))))
+            (set-buffer other)
+            (should (java-kit-test--wait-for (lambda () success-buffer)))
+            (should (eq requester success-buffer)))
+        (kill-buffer requester)
+        (kill-buffer other)
+        (when-let* ((buffer (get-buffer "*java-kit spring-build:build*")))
+          (kill-buffer buffer))
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
+          (kill-buffer buffer))))))
+
+(ert-deftest java-kit-test-app-continuation-is-skipped-when-requester-is-closed ()
+  (java-kit-test--with-temp-directory root
+    (let* ((java-kit-app--services (make-hash-table :test #'equal))
+           (global-mode-string nil)
+           (java-kit-app-stop-timeout 5)
+           (requester (generate-new-buffer " requester"))
+           (other (generate-new-buffer " other"))
+           (context (java-kit-test--start-shell-service
+                     root "trap 'exit 0' TERM; while :; do sleep 0.05; done"
+                     'spring-boot))
+           ran)
+      (unwind-protect
+          (progn
+            (with-current-buffer requester
+              (java-kit-app--stop context 'spring-boot t
+                                  (lambda () (setq ran (current-buffer)))))
+            (kill-buffer requester)
+            (set-buffer other)
+            (should (java-kit-test--wait-for
+                     (lambda ()
+                       (null (java-kit-app--live-service context 'spring-boot)))))
+            (sleep-for 0.2)
+            (should-not ran))
+        (kill-buffer other)
+        (when-let* ((buffer (get-buffer "*java-kit spring-boot:app*")))
+          (kill-buffer buffer))))))
 
 (ert-deftest java-kit-test-debug-main-public-workflow-builds-dape-launch ()
   (java-kit-test--with-temp-directory root
@@ -1790,6 +2066,39 @@
              "<version>1</version></parent></project>"))
     (should (equal "21" (java-kit--maven-java-version
                          (expand-file-name "child/pom.xml" root))))))
+
+(ert-deftest java-kit-test-managed-jdks-are-found-by-exact-major ()
+  (java-kit-test--with-temp-directory root
+    (let* ((brew (java-kit-test--fake-jdk
+                  (expand-file-name "brew/openjdk/Contents/Home" root) "27"))
+           (sdkman (java-kit-test--fake-jdk
+                    (expand-file-name "sdk/21.0.2-tem" root) "21.0.2"))
+           (java-kit-jdk-search-patterns
+            (list (expand-file-name "brew/openjdk*" root)
+                  (expand-file-name "sdk/*" root)))
+           (process-environment (cons "JAVA_HOME=" process-environment)))
+      (java-kit-test--write-file (expand-file-name "sdk/notes.txt" root) "")
+      (make-symbolic-link "21.0.2-tem" (expand-file-name "sdk/current" root))
+      (cl-letf (((symbol-function 'java-kit--macos-java-homes) #'ignore)
+                ((symbol-function 'java-kit--linux-java-homes) #'ignore)
+                ((symbol-function 'java-kit--java-home-from-path) #'ignore))
+        (should (equal brew (java-kit--find-java-home "27")))
+        (should (equal sdkman (java-kit--find-java-home "21")))
+        (should-not (java-kit--find-java-home "17"))
+        (should (equal (list brew sdkman)
+                       (java-kit--installed-java-homes)))))))
+
+(ert-deftest java-kit-test-new-maven-passes-the-chosen-package ()
+  (java-kit-test--with-temp-directory parent
+    (let (command)
+      (cl-letf (((symbol-function 'java-kit-new--start-local-command)
+                 (lambda (arguments _directory _destination)
+                   (setq command arguments))))
+        (java-kit-new-project-from-spec
+         (list :provider 'maven :parent parent :group "com.example"
+               :artifact "demo" :package "org.other.app")))
+      (should (member "-DgroupId=com.example" command))
+      (should (member "-Dpackage=org.other.app" command)))))
 
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here

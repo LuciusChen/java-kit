@@ -477,6 +477,7 @@ Interactively, obtain source roots from JDTLS and prompt for all values."
    (list "mvn" "archetype:generate"
          (concat "-DgroupId=" (plist-get spec :group))
          (concat "-DartifactId=" (plist-get spec :artifact))
+         (concat "-Dpackage=" (plist-get spec :package))
          "-DarchetypeArtifactId=maven-archetype-quickstart"
          "-DinteractiveMode=false")
    (file-name-directory (directory-file-name destination))

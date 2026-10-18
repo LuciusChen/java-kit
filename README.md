@@ -112,7 +112,7 @@ For project processes, `java-kit` checks an interactive per-module choice, an ex
 4. Maven compiler properties or `maven-compiler-plugin` configuration, read from the module POM and then from local parent POMs through `<relativePath>` (default `../pom.xml`; an empty one, or a POM whose artifactId, groupId or version does not match the declared parent, ends the search), with module values overriding parent values and, as in Maven, explicit compiler plugin settings beating the `maven.compiler.*` properties and `release` beating `source` and `target`; a parent's plugin marked `<inherited>false</inherited>` is ignored
 5. common Gradle toolchain and source-compatibility syntax
 
-On macOS, project versions are resolved through `/usr/libexec/java_home`; on Linux, installed homes under `/usr/lib/jvm` are considered. `M-x java-kit-select-project-jdk` records a choice only for the current build module, and `C-u M-x java-kit-select-project-jdk` clears it.
+On macOS, project versions are resolved through `/usr/libexec/java_home`; on Linux, installed homes under `/usr/lib/jvm` are considered. JDKs outside those registries are found through `java-kit-jdk-search-patterns`, which by default covers Homebrew `openjdk`, SDKMAN, asdf, mise, and `~/.jdks`; they are searched after `JAVA_HOME` and the `java` on PATH. `M-x java-kit-select-project-jdk` records a choice only for the current build module, and `C-u M-x java-kit-select-project-jdk` clears it.
 
 For a persistent project override, use `.dir-locals.el`:
 
@@ -178,7 +178,7 @@ The remote integrations follow the providers' documented generators: [Spring Ini
 
 ## Spring Boot, Tomcat, and Dape
 
-`java-kit-spring-boot-run` builds with Maven `package -DskipTests` or Gradle `bootJar -x test`, then starts the newest runnable JAR with the resolved project JDK. The stop and restart commands affect only the process recorded for the current module.
+`java-kit-spring-boot-run` builds with Maven `package -DskipTests` or Gradle `bootJar -x test`, then starts the newest runnable JAR with the resolved project JDK. The stop and restart commands affect only the process recorded for the current module. Stopping sends SIGTERM so the application runs its shutdown hooks (Spring's graceful shutdown, `@PreDestroy`, connection pool closing); a process still running after `java-kit-app-stop-timeout` seconds (default 10) is killed. Restart starts the new process only after the old one has exited, in the buffer that requested it; if that buffer is closed meanwhile, the pending restart is skipped rather than using another project's settings.
 
 Tomcat is detected from `CATALINA_HOME`, `catalina.sh` on `PATH`, or an unambiguous conventional macOS/Linux installation. Homebrew keeps configuration under `etc/tomcat@9`, but the installation home is its `libexec` directory:
 
@@ -204,7 +204,7 @@ Tomcat's runtime JDK is independent from the application's compilation JDK. This
 
 Arch Linux's `tomcat9` package is detected under `/usr/share/tomcat9`; its top-level configuration files are copied from the package's `/etc/tomcat9` target into the project base. The Emacs user must be able to read those files. Arch normally grants this through the `tomcat9` group (`sudo usermod -aG tomcat9 "$USER"`, followed by a new login). Per-Host context descriptors and the package-owned `/var/lib/tomcat9/webapps` are not copied or modified by default.
 
-Both `java-kit-tomcat-deploy` and `java-kit-tomcat-restart` build the current WAR, stop the tracked Tomcat after a successful build, reset only the managed base's deployment state, copy the configured WAR, and start the home's `catalina.sh run` as a tracked foreground process. Switching projects on the same port stops only the conflicting java-kit-managed Tomcat. The commands never use `pgrep` or kill an unrelated JVM. Set `java-kit-tomcat-base` to nil only when intentionally using `CATALINA_BASE` or the installation home directly.
+Both `java-kit-tomcat-deploy` and `java-kit-tomcat-restart` build the current WAR, stop the tracked Tomcat after a successful build (gracefully, as described above, and waiting for it to exit), reset only the managed base's deployment state, copy the configured WAR, and start the home's `catalina.sh run` as a tracked foreground process. Switching projects on the same port stops only the conflicting java-kit-managed Tomcat. The commands never use `pgrep` or kill an unrelated JVM. Set `java-kit-tomcat-base` to nil only when intentionally using `CATALINA_BASE` or the installation home directly.
 
 Use a prefix argument with Spring Boot run or Tomcat deploy/restart to enable JDWP. `java-kit-app-auto-debug-attach` attaches Dape after the readiness message by default; set it to nil to opt out. `java-kit-dape-attach` can also attach manually to any listening JDWP port through the JDTLS Java Debug adapter.
 
