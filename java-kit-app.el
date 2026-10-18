@@ -476,7 +476,9 @@ Return non-nil when a live process is being stopped."
                       ('maven (expand-file-name "target" root))
                       ('gradle (expand-file-name "build/libs" root))))
          (jar (java-kit-app--newest-artifact
-               directory "\\.jar\\'" "\\(?:-plain\\|-original\\)\\.jar\\'")))
+               directory "\\.jar\\'"
+               (concat "\\(?:-plain\\|-original\\|-sources\\|-javadoc"
+                       "\\|-tests\\|-test-sources\\)\\.jar\\'"))))
     (or jar
         (user-error "No runnable Spring Boot JAR found under %s" directory))))
 

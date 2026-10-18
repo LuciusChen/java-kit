@@ -2100,5 +2100,22 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
       (should (member "-DgroupId=com.example" command))
       (should (member "-Dpackage=org.other.app" command)))))
 
+(ert-deftest java-kit-test-spring-boot-jar-skips-auxiliary-jars ()
+  (java-kit-test--with-temp-directory root
+    (let ((target (expand-file-name "target" root))
+          (time (current-time)))
+      (make-directory target t)
+      ;; Auxiliary jars are produced after the runnable one, so they are newer.
+      (cl-loop for name in '("app-1.0.jar" "app-1.0-sources.jar"
+                             "app-1.0-javadoc.jar" "app-1.0-tests.jar"
+                             "app-1.0-original.jar" "app-1.0-plain.jar")
+               for age from 0
+               do (let ((file (java-kit-test--write-file
+                               (expand-file-name name target) "")))
+                    (set-file-times file (time-add time age))))
+      (should (equal (expand-file-name "app-1.0.jar" target)
+                     (java-kit-app--spring-boot-jar
+                      (list :module-root root :build-system 'maven)))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
