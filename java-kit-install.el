@@ -295,49 +295,62 @@ and may require a newer project JDK."
 
 (defvar url-http-end-of-headers)
 
+(defun java-kit-install--abandon-requests (handler)
+  "Close every connection whose completion callback is HANDLER.
+A redirect continues in a new buffer, so the buffer `url-retrieve' returned
+is not necessarily the one holding the live connection."
+  (dolist (buffer (buffer-list))
+    (when (and (local-variable-p 'url-callback-function buffer)
+               (eq handler (buffer-local-value 'url-callback-function buffer)))
+      (when-let* ((process (get-buffer-process buffer)))
+        (delete-process process))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer)))))
+
 (defun java-kit-install--download-async (url file callback)
   "Download URL to FILE without blocking Emacs, then call CALLBACK.
 CALLBACK receives nil on success or an error message string.  A download
 that exceeds `java-kit-install-download-timeout' is abandoned."
-  (let (done timer)
+  (let (done timer handler)
     (cl-flet ((finish (message)
                 (unless done
                   (setq done t)
                   (when timer (cancel-timer timer))
                   (funcall callback message))))
-      (let ((buffer
-             (url-retrieve
-              url
-              (lambda (status)
-                (let ((response (current-buffer)))
-                  (finish
-                   (unwind-protect
-                       (condition-case error-data
-                           (cond
-                            (done nil)
-                            ((plist-get status :error)
-                             (format "Download failed: %S"
-                                     (plist-get status :error)))
-                            ((/= 200 (url-http-parse-response))
-                             (format "Download failed: HTTP %s"
-                                     (url-http-parse-response)))
-                            (t
-                             (let ((coding-system-for-write 'binary))
-                               (write-region (1+ url-http-end-of-headers)
-                                             (point-max) file nil 'silent))
-                             nil))
-                         (error (error-message-string error-data)))
-                     (kill-buffer response)))))
-              nil t)))
-        (setq timer
-              (run-at-time
-               java-kit-install-download-timeout nil
-               (lambda ()
-                 (finish "Download timed out")
-                 (when (buffer-live-p buffer)
-                   (when-let* ((process (get-buffer-process buffer)))
-                     (delete-process process))
-                   (kill-buffer buffer)))))))))
+      (setq handler
+            (lambda (status)
+              (let ((response (current-buffer)))
+                (finish
+                 (unwind-protect
+                     (condition-case error-data
+                         (cond
+                          (done nil)
+                          ((plist-get status :error)
+                           (format "Download failed: %S"
+                                   (plist-get status :error)))
+                          ((/= 200 (url-http-parse-response))
+                           (format "Download failed: HTTP %s"
+                                   (url-http-parse-response)))
+                          (t
+                           (let ((coding-system-for-write 'binary))
+                             (write-region (1+ url-http-end-of-headers)
+                                           (point-max) file nil 'silent))
+                           nil))
+                       (error (error-message-string error-data)))
+                   (kill-buffer response))))))
+      (condition-case error-data
+          (progn
+            (url-retrieve url handler nil t)
+            (unless done
+              (setq timer
+                    (run-at-time
+                     java-kit-install-download-timeout nil
+                     (lambda ()
+                       (finish "Download timed out")
+                       (java-kit-install--abandon-requests handler))))))
+        (error
+         (finish (format "Download could not start: %s"
+                         (error-message-string error-data))))))))
 
 (defun java-kit-install--install-jdtls-release (release &optional on-done)
   "Install the JDTLS RELEASE transactionally without blocking Emacs.

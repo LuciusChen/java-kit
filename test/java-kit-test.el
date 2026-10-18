@@ -2202,5 +2202,75 @@ CHECKSUM, when non-nil, replaces the published SHA-256."
                                    (buffer-string))))
             (should-not (directory-files root nil "\\`\\.jdtls-stage-"))))))))
 
+(ert-deftest java-kit-test-jdtls-install-start-failure-releases-the-lock ()
+  (java-kit-test--with-temp-directory root
+    (let ((java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+          (java-kit-install--jdtls-installing nil)
+          (outcome 'pending))
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (&rest _) (error "Cannot start"))))
+        (java-kit-install--install-jdtls-release
+         (list :tool 'jdtls :version "1.0.0" :file "x.tar.gz"
+               :url "http://127.0.0.1:9/x" :checksum-url "http://127.0.0.1:9/y")
+         (lambda (failure) (setq outcome failure))))
+      (should (stringp outcome))
+      (should-not java-kit-install--jdtls-installing)
+      (should-not (directory-files root nil "\\`\\.jdtls-stage-")))))
+
+(ert-deftest java-kit-test-download-timeout-closes-the-redirected-connection ()
+  (skip-unless (executable-find "python3"))
+  (java-kit-test--with-temp-directory root
+    (let ((script (java-kit-test--write-file
+                   (expand-file-name "slow.py" root)
+                   (concat
+                    "import http.server, sys, time\n"
+                    "class H(http.server.BaseHTTPRequestHandler):\n"
+                    "    def do_GET(self):\n"
+                    "        if self.path == '/a':\n"
+                    "            self.send_response(302)\n"
+                    "            self.send_header('Location', '/slow')\n"
+                    "            self.send_header('Content-Length', '0')\n"
+                    "            self.end_headers()\n"
+                    "        else:\n"
+                    "            self.send_response(200)\n"
+                    "            self.send_header('Content-Length', '100000')\n"
+                    "            self.end_headers()\n"
+                    "            for _ in range(100):\n"
+                    "                self.wfile.write(b'x' * 1000)\n"
+                    "                self.wfile.flush()\n"
+                    "                time.sleep(0.2)\n"
+                    "    def log_message(self, *args): pass\n"
+                    "http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n")))
+          (port (+ 20000 (random 30000)))
+          (java-kit-install-download-timeout 0.5)
+          (outcome 'pending)
+          server)
+      (setq server (make-process :name "jk-slow" :buffer nil :noquery t
+                                 :command (list "python3" script
+                                                (number-to-string port))))
+      (unwind-protect
+          (progn
+            (should (java-kit-test--wait-for
+                     (lambda ()
+                       (ignore-errors
+                         (delete-process
+                          (open-network-stream "jk-probe" nil "127.0.0.1" port))
+                         t))))
+            (java-kit-install--download-async
+             (format "http://127.0.0.1:%d/a" port)
+             (expand-file-name "out" root)
+             (lambda (failure) (setq outcome failure)))
+            (should (java-kit-test--wait-for
+                     (lambda () (not (eq 'pending outcome)))))
+            (should (equal "Download timed out" outcome))
+            (accept-process-output nil 0.2)
+            (should-not
+             (seq-filter (lambda (process)
+                           (and (process-live-p process)
+                                (equal port (plist-get (process-contact process t)
+                                                       :service))))
+                         (process-list))))
+        (delete-process server)))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
