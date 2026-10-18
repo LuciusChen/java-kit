@@ -1728,7 +1728,7 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
               ((symbol-function 'java-kit-install--read-version)
                (lambda (_file) "1.2.3"))
               ((symbol-function 'java-kit-install--install-jdtls-release)
-               (lambda (actual) (setq installed actual))))
+               (lambda (actual &optional _on-done) (setq installed actual))))
       (java-kit-install-jdtls)
       (should-not installed)
       (java-kit-install-jdtls t)
@@ -2099,6 +2099,178 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
                :artifact "demo" :package "org.other.app")))
       (should (member "-DgroupId=com.example" command))
       (should (member "-Dpackage=org.other.app" command)))))
+
+(defmacro java-kit-test--with-http-server (directory url &rest body)
+  "Serve DIRECTORY over HTTP while running BODY with URL bound to its root."
+  (declare (indent 2))
+  `(let* ((port (+ 20000 (random 30000)))
+          (,url (format "http://127.0.0.1:%d" port))
+          (server (make-process
+                   :name "jk-http" :buffer nil :noquery t
+                   :command (list "python3" "-m" "http.server"
+                                  (number-to-string port)
+                                  "--bind" "127.0.0.1"
+                                  "--directory" ,directory))))
+     (unwind-protect
+         (progn
+           (should (java-kit-test--wait-for
+                    (lambda ()
+                      (ignore-errors
+                        (delete-process
+                         (open-network-stream "jk-probe" nil
+                                              "127.0.0.1" port))
+                        t))))
+           ,@body)
+       (delete-process server))))
+
+(defun java-kit-test--jdtls-release (served url checksum)
+  "Return a release plist for a tiny JDTLS archive in SERVED at URL.
+CHECKSUM, when non-nil, replaces the published SHA-256."
+  (let* ((staging (expand-file-name "stage" served))
+         (file "jdt-language-server-1.0.0-1.tar.gz")
+         (archive (expand-file-name file served)))
+    (java-kit-test--write-file (expand-file-name "bin/jdtls" staging) "#!/bin/sh\n")
+    (should (zerop (call-process "tar" nil nil nil "-czf" archive
+                                 "-C" staging "bin")))
+    (java-kit-test--write-file
+     (concat archive ".sha256")
+     (or checksum (java-kit-install--file-sha256 archive)))
+    (list :tool 'jdtls :version "1.0.0" :file file
+          :url (concat url "/" file)
+          :checksum-url (concat url "/" file ".sha256"))))
+
+(ert-deftest java-kit-test-jdtls-install-does-not-block-emacs ()
+  (skip-unless (and (executable-find "python3") (executable-find "tar")))
+  (java-kit-test--with-temp-directory root
+    (let* ((served (expand-file-name "served" root))
+           (java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+           (java-kit-install--jdtls-installing nil)
+           (outcome 'pending))
+      (make-directory served t)
+      (java-kit-test--with-http-server served url
+        (let ((release (java-kit-test--jdtls-release served url nil)))
+          (java-kit-install--install-jdtls-release
+           release (lambda (failure) (setq outcome failure)))
+          ;; The call returns before anything has been downloaded or installed.
+          (should (eq 'pending outcome))
+          (should java-kit-install--jdtls-installing)
+          (should-not (file-exists-p
+                       (expand-file-name "bin/jdtls"
+                                         java-kit-jdtls-install-directory)))
+          (should-error (java-kit-install--install-jdtls-release release)
+                        :type 'user-error)
+          (should (java-kit-test--wait-for (lambda () (not (eq 'pending outcome)))))
+          (should-not outcome)
+          (should-not java-kit-install--jdtls-installing)
+          (should (file-regular-p (expand-file-name
+                                   "bin/jdtls"
+                                   java-kit-jdtls-install-directory)))
+          (should (equal "1.0.0"
+                         (java-kit-install--read-version
+                          (java-kit-install--version-file
+                           java-kit-jdtls-install-directory))))
+          (should-not (directory-files root nil "\\`\\.jdtls-stage-")))))))
+
+(ert-deftest java-kit-test-jdtls-install-failure-keeps-the-installed-copy ()
+  (skip-unless (and (executable-find "python3") (executable-find "tar")))
+  (java-kit-test--with-temp-directory root
+    (let* ((served (expand-file-name "served" root))
+           (java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+           (java-kit-install--jdtls-installing nil)
+           (kept (java-kit-test--write-file
+                  (expand-file-name "bin/jdtls" java-kit-jdtls-install-directory)
+                  "old"))
+           (outcome 'pending))
+      (make-directory served t)
+      (java-kit-test--with-http-server served url
+        (dolist (case (list (cons "bad checksum" (make-string 64 ?0))
+                            (cons "missing archive" nil)))
+          (setq outcome 'pending)
+          (let ((release (java-kit-test--jdtls-release
+                          served url (cdr case))))
+            (when (equal (car case) "missing archive")
+              (setq release (plist-put release :url
+                                       (concat url "/absent.tar.gz"))))
+            (java-kit-install--install-jdtls-release
+             release (lambda (failure) (setq outcome failure)))
+            (should (java-kit-test--wait-for
+                     (lambda () (not (eq 'pending outcome)))))
+            (should (stringp outcome))
+            (should-not java-kit-install--jdtls-installing)
+            (should (equal "old" (with-temp-buffer
+                                   (insert-file-contents kept)
+                                   (buffer-string))))
+            (should-not (directory-files root nil "\\`\\.jdtls-stage-"))))))))
+
+(ert-deftest java-kit-test-jdtls-install-start-failure-releases-the-lock ()
+  (java-kit-test--with-temp-directory root
+    (let ((java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+          (java-kit-install--jdtls-installing nil)
+          (outcome 'pending))
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (&rest _) (error "Cannot start"))))
+        (java-kit-install--install-jdtls-release
+         (list :tool 'jdtls :version "1.0.0" :file "x.tar.gz"
+               :url "http://127.0.0.1:9/x" :checksum-url "http://127.0.0.1:9/y")
+         (lambda (failure) (setq outcome failure))))
+      (should (stringp outcome))
+      (should-not java-kit-install--jdtls-installing)
+      (should-not (directory-files root nil "\\`\\.jdtls-stage-")))))
+
+(ert-deftest java-kit-test-download-timeout-closes-the-redirected-connection ()
+  (skip-unless (executable-find "python3"))
+  (java-kit-test--with-temp-directory root
+    (let ((script (java-kit-test--write-file
+                   (expand-file-name "slow.py" root)
+                   (concat
+                    "import http.server, sys, time\n"
+                    "class H(http.server.BaseHTTPRequestHandler):\n"
+                    "    def do_GET(self):\n"
+                    "        if self.path == '/a':\n"
+                    "            self.send_response(302)\n"
+                    "            self.send_header('Location', '/slow')\n"
+                    "            self.send_header('Content-Length', '0')\n"
+                    "            self.end_headers()\n"
+                    "        else:\n"
+                    "            self.send_response(200)\n"
+                    "            self.send_header('Content-Length', '100000')\n"
+                    "            self.end_headers()\n"
+                    "            for _ in range(100):\n"
+                    "                self.wfile.write(b'x' * 1000)\n"
+                    "                self.wfile.flush()\n"
+                    "                time.sleep(0.2)\n"
+                    "    def log_message(self, *args): pass\n"
+                    "http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n")))
+          (port (+ 20000 (random 30000)))
+          (java-kit-install-download-timeout 0.5)
+          (outcome 'pending)
+          server)
+      (setq server (make-process :name "jk-slow" :buffer nil :noquery t
+                                 :command (list "python3" script
+                                                (number-to-string port))))
+      (unwind-protect
+          (progn
+            (should (java-kit-test--wait-for
+                     (lambda ()
+                       (ignore-errors
+                         (delete-process
+                          (open-network-stream "jk-probe" nil "127.0.0.1" port))
+                         t))))
+            (java-kit-install--download-async
+             (format "http://127.0.0.1:%d/a" port)
+             (expand-file-name "out" root)
+             (lambda (failure) (setq outcome failure)))
+            (should (java-kit-test--wait-for
+                     (lambda () (not (eq 'pending outcome)))))
+            (should (equal "Download timed out" outcome))
+            (accept-process-output nil 0.2)
+            (should-not
+             (seq-filter (lambda (process)
+                           (and (process-live-p process)
+                                (equal port (plist-get (process-contact process t)
+                                                       :service))))
+                         (process-list))))
+        (delete-process server)))))
 
 (defun java-kit-test--write-jar (file main-class)
   "Write a JAR at FILE whose manifest declares MAIN-CLASS, when non-nil.

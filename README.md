@@ -66,7 +66,7 @@ Tool downloads are always explicit:
 - `M-x java-kit-install-junit` installs or upgrades the newest stable Java 8-compatible JUnit Platform 1.x release
 - `M-x java-kit-tools-status` shows recorded installed versions
 
-Both installers stage downloads beside their destinations and verify published SHA-256 checksums before replacement. Use a prefix argument to force reinstallation of the same version.
+Both installers stage downloads beside their destinations and verify published SHA-256 checksums before replacement. The JDTLS archive downloads in the background, so Emacs stays usable; the result is reported in the echo area, a second installation is refused while one runs, and a failed or abandoned download (`java-kit-install-download-timeout`, default 600 seconds) leaves the installed copy untouched. Use a prefix argument to force reinstallation of the same version.
 
 To follow JUnit's newest major instead of the Java 8-compatible line:
 
