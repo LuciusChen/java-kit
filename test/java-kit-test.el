@@ -1556,5 +1556,17 @@
                     (expand-file-name "demo" parent))
               captured)))))
 
+(ert-deftest java-kit-test-new-maven-passes-the-chosen-package ()
+  (java-kit-test--with-temp-directory parent
+    (let (command)
+      (cl-letf (((symbol-function 'java-kit-new--start-local-command)
+                 (lambda (arguments _directory _destination)
+                   (setq command arguments))))
+        (java-kit-new-project-from-spec
+         (list :provider 'maven :parent parent :group "com.example"
+               :artifact "demo" :package "org.other.app")))
+      (should (member "-DgroupId=com.example" command))
+      (should (member "-Dpackage=org.other.app" command)))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
