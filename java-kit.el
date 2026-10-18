@@ -135,6 +135,20 @@ configuration."
                  (function :tag "Resolver function"))
   :group 'java-kit)
 
+(defcustom java-kit-jdk-search-patterns
+  '("/opt/homebrew/opt/openjdk*/libexec/openjdk.jdk/Contents/Home"
+    "/usr/local/opt/openjdk*/libexec/openjdk.jdk/Contents/Home"
+    "~/.sdkman/candidates/java/*"
+    "~/.asdf/installs/java/*"
+    "~/.local/share/mise/installs/java/*"
+    "~/.jdks/*")
+  "Glob patterns for JDK homes managed outside the system JDK registry.
+
+A match, or its `Contents/Home' subdirectory, counts when it is a full JDK.
+These homes are searched after the platform registry, `JAVA_HOME' and PATH."
+  :type '(repeat string)
+  :group 'java-kit)
+
 (defcustom java-kit-maven-default-task "test"
   "Default task offered for Maven builds."
   :type 'string
@@ -602,6 +616,22 @@ SEEN tracks property names already visited."
           (push (string-trim (match-string 1)) homes))))
     (seq-filter #'java-kit--valid-java-home-p (delete-dups homes))))
 
+(defun java-kit--managed-java-homes ()
+  "Return JDK homes matching `java-kit-jdk-search-patterns'.
+Each JDK appears once, even when a version manager links to it."
+  (let (homes seen)
+    (dolist (pattern java-kit-jdk-search-patterns)
+      (dolist (match (file-expand-wildcards (expand-file-name pattern) t))
+        (when-let* ((home (seq-find #'java-kit--valid-java-home-p
+                                    (list match
+                                          (expand-file-name
+                                           "Contents/Home" match))))
+                    (truename (file-truename home))
+                    ((not (member truename seen))))
+          (push truename seen)
+          (push home homes))))
+    (nreverse homes)))
+
 (defun java-kit--installed-java-homes ()
   "Return JDK homes available for interactive project selection."
   (let ((homes
@@ -610,7 +640,8 @@ SEEN tracks property names already visited."
             ('darwin (java-kit--macos-java-homes))
             ('gnu/linux (java-kit--linux-java-homes)))
           (list (getenv "JAVA_HOME")
-                (java-kit--java-home-from-path)))))
+                (java-kit--java-home-from-path))
+          (java-kit--managed-java-homes))))
     (delete-dups (seq-filter #'java-kit--valid-java-home-p homes))))
 
 (defun java-kit--project-jdk-key (context)
@@ -649,7 +680,10 @@ SEEN tracks property names already visited."
       (let ((path-home (java-kit--java-home-from-path)))
         (and path-home
              (equal version (java-kit--java-home-major path-home))
-             path-home))))
+             path-home))
+      (seq-find (lambda (home)
+                  (equal version (java-kit--java-home-major home)))
+                (java-kit--managed-java-homes))))
 
 (defun java-kit-resolve-project-java-home (&optional context)
   "Resolve the JDK home used for project processes in CONTEXT."

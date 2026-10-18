@@ -1829,6 +1829,27 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
                     (expand-file-name "demo" parent))
               captured)))))
 
+(ert-deftest java-kit-test-managed-jdks-are-found-by-exact-major ()
+  (java-kit-test--with-temp-directory root
+    (let* ((brew (java-kit-test--fake-jdk
+                  (expand-file-name "brew/openjdk/Contents/Home" root) "27"))
+           (sdkman (java-kit-test--fake-jdk
+                    (expand-file-name "sdk/21.0.2-tem" root) "21.0.2"))
+           (java-kit-jdk-search-patterns
+            (list (expand-file-name "brew/openjdk*" root)
+                  (expand-file-name "sdk/*" root)))
+           (process-environment (cons "JAVA_HOME=" process-environment)))
+      (java-kit-test--write-file (expand-file-name "sdk/notes.txt" root) "")
+      (make-symbolic-link "21.0.2-tem" (expand-file-name "sdk/current" root))
+      (cl-letf (((symbol-function 'java-kit--macos-java-homes) #'ignore)
+                ((symbol-function 'java-kit--linux-java-homes) #'ignore)
+                ((symbol-function 'java-kit--java-home-from-path) #'ignore))
+        (should (equal brew (java-kit--find-java-home "27")))
+        (should (equal sdkman (java-kit--find-java-home "21")))
+        (should-not (java-kit--find-java-home "17"))
+        (should (equal (list brew sdkman)
+                       (java-kit--installed-java-homes)))))))
+
 (ert-deftest java-kit-test-new-maven-passes-the-chosen-package ()
   (java-kit-test--with-temp-directory parent
     (let (command)
