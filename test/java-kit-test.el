@@ -2101,16 +2101,21 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
       (should (member "-Dpackage=org.other.app" command)))))
 
 (defun java-kit-test--write-jar (file main-class)
-  "Write a JAR at FILE whose manifest declares MAIN-CLASS, when non-nil."
+  "Write a JAR at FILE whose manifest declares MAIN-CLASS, when non-nil.
+A nil MAIN-CLASS gives a manifest without launcher; `none' omits the manifest."
   (let ((staging (make-temp-file "jk-jar" t)))
     (unwind-protect
         (let ((default-directory staging))
           (java-kit-test--write-file
-           (expand-file-name "META-INF/MANIFEST.MF" staging)
+           (expand-file-name (if (eq main-class 'none)
+                                 "app.txt"
+                               "META-INF/MANIFEST.MF")
+                             staging)
            (concat "Manifest-Version: 1.0\n"
-                   (and main-class (format "Main-Class: %s\n" main-class))))
+                   (and (stringp main-class)
+                        (format "Main-Class: %s\n" main-class))))
           (should (zerop (call-process "zip" nil nil nil "-q" "-r" file
-                                       "META-INF"))))
+                                       "."))))
       (delete-directory staging t))))
 
 (ert-deftest java-kit-test-spring-boot-jar-is-chosen-by-launcher ()
@@ -2122,7 +2127,7 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
       (make-directory target t)
       ;; Auxiliary jars are produced after the runnable one, so they are newer.
       (cl-loop for (name . main) in '(("app-1.0.jar" . "JarLauncher")
-                                      ("app-1.0-sources.jar")
+                                      ("app-1.0-sources.jar" . none)
                                       ("app-1.0-tests.jar")
                                       ("app-1.0-plain.jar" . "Main"))
                for age from 0

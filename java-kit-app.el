@@ -472,16 +472,17 @@ When PREDICATE is non-nil, the file must also satisfy it."
          (file-attribute-modification-time (file-attributes first))))))))
 
 (defun java-kit-app--executable-jar-p (jar)
-  "Return non-nil unless JAR's manifest is readable and has no `Main-Class'.
-Sources, javadoc and test JARs carry no launcher.  Their names cannot be
-trusted to tell them apart, since a project may call its application
-`service-tests'."
-  (with-temp-buffer
-    (or (not (executable-find "unzip"))
-        (not (zerop (call-process "unzip" nil t nil "-p" jar
-                                  "META-INF/MANIFEST.MF")))
-        (progn (goto-char (point-min))
-               (re-search-forward "^Main-Class:" nil t)))))
+  "Return non-nil when JAR's manifest declares a `Main-Class'.
+Sources, javadoc and test JARs carry no launcher, and a JAR without a
+readable manifest cannot be started with `java -jar' either.  Names cannot
+tell these apart, since a project may call its application `service-tests'.
+Without `unzip' nothing can be judged, so every JAR qualifies."
+  (or (not (executable-find "unzip"))
+      (with-temp-buffer
+        (and (zerop (call-process "unzip" nil t nil "-p" jar
+                                  "META-INF/MANIFEST.MF"))
+             (progn (goto-char (point-min))
+                    (re-search-forward "^Main-Class:" nil t))))))
 
 (defun java-kit-app--spring-boot-jar (context)
   "Return the built Spring Boot JAR for CONTEXT."
