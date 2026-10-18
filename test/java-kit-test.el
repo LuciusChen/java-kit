@@ -1829,6 +1829,244 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
                     (expand-file-name "demo" parent))
               captured)))))
 
+(ert-deftest java-kit-test-maven-java-version-comes-from-local-parent ()
+  (java-kit-test--with-temp-directory root
+    (let ((parent-pom "<project><artifactId>p</artifactId><properties><maven.compiler.release>11</maven.compiler.release></properties></project>")
+          (child "<project><parent><artifactId>p</artifactId></parent></project>"))
+      (java-kit-test--write-file (expand-file-name "pom.xml" root) parent-pom)
+      (java-kit-test--write-file
+       (expand-file-name "a/pom.xml" root) child)
+      ;; A child's own declaration wins over the parent's.
+      (java-kit-test--write-file
+       (expand-file-name "b/pom.xml" root)
+       "<project><parent/><properties><java.version>17</java.version></properties></project>")
+      ;; An empty relativePath means the parent is not local.
+      (java-kit-test--write-file
+       (expand-file-name "c/pom.xml" root)
+       "<project><parent><relativePath/></parent></project>")
+      ;; A custom relativePath is honored, and cycles terminate.
+      (java-kit-test--write-file
+       (expand-file-name "d/pom.xml" root)
+       "<project><artifactId>d</artifactId><parent><artifactId>e</artifactId><relativePath>../e/pom.xml</relativePath></parent></project>")
+      (java-kit-test--write-file
+       (expand-file-name "e/pom.xml" root)
+       "<project><artifactId>e</artifactId><parent><artifactId>d</artifactId><relativePath>../d/pom.xml</relativePath></parent></project>")
+      (should (equal "11" (java-kit--maven-java-version
+                           (expand-file-name "a/pom.xml" root))))
+      (should (equal "17" (java-kit--maven-java-version
+                           (expand-file-name "b/pom.xml" root))))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name "c/pom.xml" root)))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name "d/pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-parent-inheritance-follows-maven-rules ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<properties><jdk.version>11</jdk.version>"
+             "<maven.compiler.release>${jdk.version}</maven.compiler.release>"
+             "</properties></project>"))
+    ;; A child property overrides the one a parent's expression refers to.
+    (java-kit-test--write-file
+     (expand-file-name "over/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>p</artifactId>"
+             "</parent><properties><jdk.version>21</jdk.version>"
+             "</properties></project>"))
+    ;; A readable ../pom.xml for a different artifact is not the parent.
+    (java-kit-test--write-file
+     (expand-file-name "other/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>missing</artifactId></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "wrong-group/pom.xml" root)
+     "<project><parent><groupId>h</groupId><artifactId>p</artifactId></parent></project>")
+    ;; An empty relativePath pair is the same as a self-closing one.
+    (java-kit-test--write-file
+     (expand-file-name "paired/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId><relativePath></relativePath></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "spaced/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId><relativePath> </relativePath></parent></project>")
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "over/pom.xml" root))))
+    (dolist (child '("other" "wrong-group" "paired" "spaced"))
+      (should-not (java-kit--maven-java-version
+                   (expand-file-name (concat child "/pom.xml") root))))))
+
+(ert-deftest java-kit-test-maven-explicit-compiler-setting-beats-property ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><properties>"
+             "<maven.compiler.release>11</maven.compiler.release>"
+             "</properties></project>"))
+    ;; Child plugin configuration overrides the parent's property.
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent><build>"
+             "<plugins><plugin><artifactId>maven-compiler-plugin</artifactId>"
+             "<configuration><release>21</release></configuration></plugin>"
+             "</plugins></build></project>"))
+    ;; The same holds inside one POM, and release beats source.
+    (java-kit-test--write-file
+     (expand-file-name "single/pom.xml" root)
+     (concat "<project><properties><maven.compiler.release>11"
+             "</maven.compiler.release><maven.compiler.source>8"
+             "</maven.compiler.source></properties><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<release>17</release></configuration></plugin></plugins>"
+             "</build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "release-first/pom.xml" root)
+     (concat "<project><properties><maven.compiler.release>11"
+             "</maven.compiler.release></properties><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<source>8</source></configuration></plugin></plugins>"
+             "</build></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))
+    (should (equal "17" (java-kit--maven-java-version
+                         (expand-file-name "single/pom.xml" root))))
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "release-first/pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-parent-version-must-match ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<version>1</version><properties><java.version>11"
+             "</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "same/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>1</version></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "newer/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>p</artifactId><version>2</version></parent></project>")
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "same/pom.xml" root))))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "newer/pom.xml" root)))))
+
+(ert-deftest java-kit-test-maven-inheritance-honors-inherited-false-and-effective-version ()
+  (java-kit-test--with-temp-directory root
+    ;; A plugin marked non-inherited configures only its own module.
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<inherited>false</inherited><configuration><release>11"
+             "</release></configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "bare/pom.xml" root)
+     "<project><parent><artifactId>p</artifactId></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "prop/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent><properties>"
+             "<maven.compiler.release>21</maven.compiler.release>"
+             "</properties></project>"))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "bare/pom.xml" root)))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "prop/pom.xml" root))))
+    ;; A parent that inherits its groupId and version still has them.
+    (java-kit-test--write-file
+     (expand-file-name "gp/pom.xml" root)
+     "<project><groupId>g</groupId><artifactId>gp</artifactId><version>1</version></project>")
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version></parent><artifactId>mid</artifactId>"
+             "<properties><java.version>11</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/ok/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>mid</artifactId><version>1</version></parent></project>")
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/stale/pom.xml" root)
+     "<project><parent><groupId>g</groupId><artifactId>mid</artifactId><version>2</version></parent></project>")
+    (should (equal "11" (java-kit--maven-java-version
+                         (expand-file-name "gp/mid/ok/pom.xml" root))))
+    (should-not (java-kit--maven-java-version
+                 (expand-file-name "gp/mid/stale/pom.xml" root)))))
+
+(ert-deftest java-kit-test-maven-inherited-flag-applies-to-the-plugin-itself ()
+  (java-kit-test--with-temp-directory root
+    ;; An execution's own inherited flag does not disable the plugin.
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><executions>"
+             "<execution><id>x</id><inherited>false</inherited></execution>"
+             "</executions><configuration><release>21</release>"
+             "</configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><artifactId>p</artifactId></parent>"
+             "<properties><java.version>17</java.version></properties></project>"))
+    ;; A non-inherited plugin in the middle also cuts off its own ancestors.
+    (java-kit-test--write-file
+     (expand-file-name "gp/pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId><configuration>"
+             "<release>11</release></configuration></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>gp</artifactId>"
+             "<version>1</version></parent><artifactId>mid</artifactId>"
+             "<build><plugins><plugin><artifactId>maven-compiler-plugin"
+             "</artifactId><inherited>false</inherited></plugin></plugins></build></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "gp/mid/kid/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>mid</artifactId>"
+             "<version>1</version></parent><properties>"
+             "<maven.compiler.release>21</maven.compiler.release></properties></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "gp/mid/kid/pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-self-closing-elements-do-not-swallow-config ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><artifactId>p</artifactId><build><plugins><plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<dependencies /><executions />"
+             "<configuration><release>21</release></configuration>"
+             "</plugin></plugins></build>"
+             "<properties><java.version>17</java.version></properties></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-commented-out-settings-are-ignored ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><build><plugins><!-- <plugin>"
+             "<artifactId>maven-compiler-plugin</artifactId>"
+             "<configuration><release>8</release></configuration></plugin> -->"
+             "</plugins></build><properties>"
+             "<!-- <maven.compiler.release>11</maven.compiler.release> -->"
+             "<java.version>17</java.version></properties></project>"))
+    (should (equal "17" (java-kit--maven-java-version
+                         (expand-file-name "pom.xml" root))))))
+
+(ert-deftest java-kit-test-maven-parent-check-ignores-comments ()
+  (java-kit-test--with-temp-directory root
+    (java-kit-test--write-file
+     (expand-file-name "pom.xml" root)
+     (concat "<project><groupId>g</groupId><artifactId>p</artifactId>"
+             "<!-- <version>0</version> --><version>1</version>"
+             "<properties><java.version>21</java.version></properties></project>"))
+    (java-kit-test--write-file
+     (expand-file-name "child/pom.xml" root)
+     (concat "<project><parent><groupId>g</groupId><artifactId>p</artifactId>"
+             "<version>1</version></parent></project>"))
+    (should (equal "21" (java-kit--maven-java-version
+                         (expand-file-name "child/pom.xml" root))))))
+
 (ert-deftest java-kit-test-managed-jdks-are-found-by-exact-major ()
   (java-kit-test--with-temp-directory root
     (let* ((brew (java-kit-test--fake-jdk

@@ -422,73 +422,196 @@ Java project without Maven or Gradle metadata."
            content)
       (string-trim (match-string 1 content)))))
 
-(defun java-kit--pom-resolve-value (content value &optional seen)
-  "Resolve a Maven property expression VALUE in CONTENT.
+(defun java-kit--pom-chain-property (chain property)
+  "Return PROPERTY from the first POM content in CHAIN that declares it."
+  (seq-some (lambda (content) (java-kit--pom-property content property))
+            chain))
+
+(defun java-kit--pom-resolve-value (chain value &optional seen)
+  "Resolve a Maven property expression VALUE through the POM CHAIN.
 
 SEEN tracks property names already visited."
   (if (and value (string-match "^\\${\\([^}]+\\)}$" value))
       (let ((property (match-string 1 value)))
         (unless (member property seen)
           (java-kit--pom-resolve-value
-           content
-           (java-kit--pom-property content property)
+           chain
+           (java-kit--pom-chain-property chain property)
            (cons property seen))))
     value))
 
-(defun java-kit--pom-plugin-configuration (content artifact-id)
-  "Return ARTIFACT-ID's plugin configuration from Maven POM CONTENT."
+(defun java-kit--pom-block (text tag)
+  "Return the content of the first TAG element in TEXT.
+A self-closing element has no content."
+  (when (string-match (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag) text)
+    (unless (eq (aref text (- (match-end 0) 2)) ?/)
+      (let ((start (match-end 0)))
+        (when-let* ((end (string-match (format "</%s[[:space:]]*>" tag)
+                                       text start)))
+          (substring text start end))))))
+
+(defun java-kit--pom-strip (text tag)
+  "Return TEXT without its TAG elements, self-closing ones included."
+  (let ((start-regexp (format "<%s\\(?:[[:space:]][^>]*\\)?>" tag))
+        (end-regexp (format "</%s[[:space:]]*>" tag))
+        (position 0)
+        (result ""))
+    (while (string-match start-regexp text position)
+      (let* ((start (match-beginning 0))
+             (self-closing (eq (aref text (- (match-end 0) 2)) ?/))
+             (end (and (not self-closing)
+                       (string-match end-regexp text (match-end 0)))))
+        (setq result (concat result (substring text position start))
+              position (cond (self-closing (match-end 0))
+                             (end (match-end 0))
+                             (t (length text))))))
+    (concat result (substring text position))))
+
+(defun java-kit--pom-plugin-declaration (content artifact-id)
+  "Return (INHERITED . CONFIGURATION) for ARTIFACT-ID's plugin in CONTENT.
+INHERITED reflects the plugin's own `inherited' element, not that of its
+executions.  Return nil when CONTENT does not declare the plugin."
   (let ((position 0)
-        configuration)
-    (while (and (not configuration)
-                (string-match
-                 "<plugin\\(?:[[:space:]][^>]*\\)?>" content position))
+        found inherited configuration)
+    (while (string-match "<plugin\\(?:[[:space:]][^>]*\\)?>" content position)
       (let* ((plugin-start (match-end 0))
              (plugin-end
-              (string-match "</plugin[[:space:]]*>" content plugin-start)))
-        (if (not plugin-end)
-            (setq position (length content))
-          (let ((next-position (match-end 0))
-                (plugin (substring content plugin-start plugin-end)))
-            (setq position next-position)
+              (string-match "</plugin[[:space:]]*>" content plugin-start))
+             (next-position (if plugin-end (match-end 0) (length content))))
+        (setq position next-position)
+        (when plugin-end
+          (let ((plugin (java-kit--pom-strip
+                         (java-kit--pom-strip
+                          (substring content plugin-start plugin-end)
+                          "executions")
+                         "dependencies")))
             (when (equal artifact-id
                          (java-kit--pom-property plugin "artifactId"))
-              (when (string-match
-                     "<configuration\\(?:[[:space:]][^>]*\\)?>" plugin)
-                (let ((configuration-start (match-end 0)))
-                  (when-let* ((configuration-end
-                               (string-match
-                                "</configuration[[:space:]]*>"
-                                plugin configuration-start)))
-                    (setq configuration
-                          (substring plugin configuration-start
-                                     configuration-end))))))))))
-    configuration))
+              (unless found
+                (setq found t
+                      inherited
+                      (not (equal "false"
+                                  (java-kit--pom-property
+                                   (java-kit--pom-strip plugin "configuration")
+                                   "inherited")))))
+              (unless configuration
+                (setq configuration
+                      (java-kit--pom-block plugin "configuration"))))))))
+    (and found (cons inherited configuration))))
+
+(defun java-kit--pom-header (content)
+  "Return CONTENT's project coordinates, without its parent or later sections."
+  (let ((header (replace-regexp-in-string
+                 "<parent>\\(?:.\\|\n\\)*?</parent>" "" content)))
+    (substring header 0
+               (string-match
+                (concat "<\\(?:dependencies\\|dependencyManagement\\|build"
+                        "\\|modules\\|profiles\\|properties\\)[[:space:]>]")
+                header))))
+
+(defun java-kit--pom-coordinate (content tag)
+  "Return the effective TAG coordinate of POM CONTENT.
+A groupId or version the POM does not declare comes from its own parent."
+  (or (java-kit--pom-property (java-kit--pom-header content) tag)
+      (when (string-match "<parent>\\(\\(?:.\\|\n\\)*?\\)</parent>" content)
+        (java-kit--pom-property (match-string 1 content) tag))))
+
+(defun java-kit--pom-declares-p (content parent)
+  "Return non-nil when POM CONTENT has the coordinates PARENT refers to."
+  (and (equal (java-kit--pom-property (java-kit--pom-header content)
+                                      "artifactId")
+              (java-kit--pom-property parent "artifactId"))
+       (cl-every (lambda (tag)
+                   (equal (java-kit--pom-coordinate content tag)
+                          (java-kit--pom-property parent tag)))
+                 '("groupId" "version"))))
+
+(defun java-kit--pom-read (file)
+  "Return the contents of POM FILE with its XML comments removed."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (while (re-search-forward "<!--" nil t)
+      (let ((start (match-beginning 0)))
+        (delete-region
+         start
+         (if (search-forward "-->" nil t) (point) (point-max)))))
+    (buffer-string)))
+
+(defun java-kit--pom-parent-file (content pom-file)
+  "Return the local parent POM that POM-FILE's CONTENT declares, if any.
+An empty `relativePath' means the parent comes from a repository, and a file
+at the path counts only when its coordinates match the declared parent."
+  (when (string-match "<parent>\\(\\(?:.\\|\n\\)*?\\)</parent>" content)
+    (let* ((parent (match-string 1 content))
+           (empty (string-match-p
+                   "<relativePath[[:space:]]*\\(?:/>\\|>[[:space:]]*</relativePath>\\)"
+                   parent))
+           (path (unless empty
+                   (or (java-kit--pom-property parent "relativePath")
+                       "../pom.xml")))
+           (file (and path
+                      (expand-file-name path (file-name-directory pom-file)))))
+      (when (and file (file-directory-p file))
+        (setq file (expand-file-name "pom.xml" file)))
+      (and file
+           (file-readable-p file)
+           (java-kit--pom-declares-p (java-kit--pom-read file) parent)
+           file))))
+
+(defun java-kit--pom-chain (pom-file)
+  "Return the contents of POM-FILE followed by its local parent POMs.
+XML comments are removed, so commented-out settings are never read."
+  (let (chain visited)
+    (while (and pom-file
+                (file-readable-p pom-file)
+                (not (member (file-truename pom-file) visited)))
+      (push (file-truename pom-file) visited)
+      (let ((content (java-kit--pom-read pom-file)))
+        (push content chain)
+        (setq pom-file (java-kit--pom-parent-file content pom-file))))
+    (nreverse chain)))
+
+(defun java-kit--pom-compiler-configurations (chain)
+  "Return the compiler plugin configurations visible through POM CHAIN.
+The result is ordered nearest first.  A parent's plugin marked
+`<inherited>false</inherited>' is not seen, and neither is anything
+declared further up, since Maven merges the plugin into that parent
+before inheriting it."
+  (let (configurations blocked)
+    (cl-loop for content in chain
+             for own = t then nil
+             until blocked
+             do (when-let* ((declaration (java-kit--pom-plugin-declaration
+                                          content "maven-compiler-plugin")))
+                  (if (or own (car declaration))
+                      (when (cdr declaration)
+                        (push (cdr declaration) configurations))
+                    (setq blocked t))))
+    (nreverse configurations)))
+
+(defun java-kit--pom-compiler-setting (configurations key)
+  "Return KEY from the first of the compiler plugin CONFIGURATIONS declaring it."
+  (seq-some (lambda (configuration)
+              (java-kit--pom-property configuration key))
+            configurations))
 
 (defun java-kit--maven-java-version (pom-file)
-  "Return the declared Java version from POM-FILE."
-  (when (file-readable-p pom-file)
-    (with-temp-buffer
-      (insert-file-contents pom-file)
-      (let* ((content (buffer-string))
-             (compiler-configuration
-              (java-kit--pom-plugin-configuration
-               content "maven-compiler-plugin"))
-             (value (or (java-kit--pom-property
-                         content "maven.compiler.release")
-                        (java-kit--pom-property
-                         content "maven.compiler.source")
-                        (java-kit--pom-property
-                         content "maven.compiler.target")
-                        (and compiler-configuration
-                             (or (java-kit--pom-property
-                                  compiler-configuration "release")
-                                 (java-kit--pom-property
-                                  compiler-configuration "source")
-                                 (java-kit--pom-property
-                                  compiler-configuration "target")))
-                        (java-kit--pom-property content "java.version"))))
-        (java-kit--extract-java-major
-         (java-kit--pom-resolve-value content value))))))
+  "Return the declared Java version from POM-FILE and its local parent POMs.
+Values declared in a module override those of its parents.  Like Maven, an
+explicit compiler plugin setting beats the property of the same name, and
+`release' beats `source' and `target'."
+  (when-let* ((chain (java-kit--pom-chain pom-file)))
+    (let* ((configurations (java-kit--pom-compiler-configurations chain))
+           (value (or (cl-loop for key in '("release" "source" "target")
+                              thereis
+                              (or (java-kit--pom-compiler-setting
+                                   configurations key)
+                                  (java-kit--pom-chain-property
+                                   chain (concat "maven.compiler." key))))
+                     (java-kit--pom-chain-property chain "java.version"))))
+      (java-kit--extract-java-major
+       (java-kit--pom-resolve-value chain value)))))
 
 (defun java-kit--gradle-java-version (module-root)
   "Return the declared Java version under MODULE-ROOT."
