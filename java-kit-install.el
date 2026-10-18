@@ -23,10 +23,13 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'tar-mode)
+(require 'url)
 (require 'url-handlers)
+(require 'url-http)
 (require 'java-kit)
 
 (defcustom java-kit-jdtls-release-channel 'milestone
@@ -70,6 +73,11 @@ and may require a newer project JDK."
   :type '(choice (const :tag "Newest Java 8-compatible 1.x release"
                         java-8-compatible)
                  (const :tag "Latest release of any major" latest))
+  :group 'java-kit)
+
+(defcustom java-kit-install-download-timeout 600
+  "Seconds an asynchronous JDTLS download may take before it is abandoned."
+  :type 'number
   :group 'java-kit)
 
 (defconst java-kit-install--junit-artifact
@@ -282,8 +290,61 @@ and may require a newer project JDK."
    destination
    (java-kit-install--url-text (plist-get release :checksum-url))))
 
-(defun java-kit-install--install-jdtls-release (release)
-  "Install the JDTLS RELEASE transactionally."
+(defvar java-kit-install--jdtls-installing nil
+  "Non-nil while a JDTLS installation is in progress.")
+
+(defvar url-http-end-of-headers)
+
+(defun java-kit-install--download-async (url file callback)
+  "Download URL to FILE without blocking Emacs, then call CALLBACK.
+CALLBACK receives nil on success or an error message string.  A download
+that exceeds `java-kit-install-download-timeout' is abandoned."
+  (let (done timer)
+    (cl-flet ((finish (message)
+                (unless done
+                  (setq done t)
+                  (when timer (cancel-timer timer))
+                  (funcall callback message))))
+      (let ((buffer
+             (url-retrieve
+              url
+              (lambda (status)
+                (let ((response (current-buffer)))
+                  (finish
+                   (unwind-protect
+                       (condition-case error-data
+                           (cond
+                            (done nil)
+                            ((plist-get status :error)
+                             (format "Download failed: %S"
+                                     (plist-get status :error)))
+                            ((/= 200 (url-http-parse-response))
+                             (format "Download failed: HTTP %s"
+                                     (url-http-parse-response)))
+                            (t
+                             (let ((coding-system-for-write 'binary))
+                               (write-region (1+ url-http-end-of-headers)
+                                             (point-max) file nil 'silent))
+                             nil))
+                         (error (error-message-string error-data)))
+                     (kill-buffer response)))))
+              nil t)))
+        (setq timer
+              (run-at-time
+               java-kit-install-download-timeout nil
+               (lambda ()
+                 (finish "Download timed out")
+                 (when (buffer-live-p buffer)
+                   (when-let* ((process (get-buffer-process buffer)))
+                     (delete-process process))
+                   (kill-buffer buffer)))))))))
+
+(defun java-kit-install--install-jdtls-release (release &optional on-done)
+  "Install the JDTLS RELEASE transactionally without blocking Emacs.
+The archive downloads in the background; ON-DONE is called with nil on
+success or an error message string."
+  (when java-kit-install--jdtls-installing
+    (user-error "A JDTLS installation is already in progress"))
   (let* ((destination
           (directory-file-name
            (expand-file-name java-kit-jdtls-install-directory)))
@@ -293,17 +354,34 @@ and may require a newer project JDK."
             (make-temp-file (expand-file-name ".jdtls-stage-" parent) t))
            (archive (expand-file-name (plist-get release :file) temporary))
            (payload (expand-file-name "payload" temporary)))
-      (unwind-protect
-          (progn
-            (java-kit-install--download-release release archive)
-            (java-kit-install--extract-tar-gz archive payload)
-            (unless (file-regular-p (expand-file-name "bin/jdtls" payload))
-              (error "Downloaded JDTLS archive has no bin/jdtls launcher"))
-            (with-temp-file (java-kit-install--version-file payload)
-              (insert (plist-get release :version) "\n"))
-            (java-kit-install--replace-directory payload destination))
-        (when (file-exists-p temporary)
-          (delete-directory temporary t))))))
+      (cl-flet ((finish (message)
+                  (setq java-kit-install--jdtls-installing nil)
+                  (when (file-exists-p temporary)
+                    (delete-directory temporary t))
+                  (when on-done (funcall on-done message))))
+        (setq java-kit-install--jdtls-installing t)
+        (message "Downloading %s %s..."
+                 (plist-get release :tool) (plist-get release :version))
+        (java-kit-install--download-async
+         (plist-get release :url) archive
+         (lambda (failure)
+           (finish
+            (or failure
+                (condition-case error-data
+                    (progn
+                      (java-kit-install--verify-download
+                       archive
+                       (java-kit-install--url-text
+                        (plist-get release :checksum-url)))
+                      (java-kit-install--extract-tar-gz archive payload)
+                      (unless (file-regular-p
+                               (expand-file-name "bin/jdtls" payload))
+                        (error "Downloaded JDTLS archive has no bin/jdtls launcher"))
+                      (with-temp-file (java-kit-install--version-file payload)
+                        (insert (plist-get release :version) "\n"))
+                      (java-kit-install--replace-directory payload destination)
+                      nil)
+                  (error (error-message-string error-data)))))))))))
 
 (defun java-kit-install--junit-version-file ()
   "Return the version marker associated with the configured JUnit JAR."
@@ -330,7 +408,8 @@ and may require a newer project JDK."
 (defun java-kit-install-jdtls (&optional force)
   "Install or upgrade JDTLS from the configured release channel.
 
-With prefix argument FORCE, reinstall an unchanged release."
+The archive downloads in the background; Emacs reports the outcome when it
+finishes.  With prefix argument FORCE, reinstall an unchanged release."
   (interactive "P")
   (let* ((release (java-kit-install--jdtls-release))
          (version (plist-get release :version))
@@ -340,8 +419,12 @@ With prefix argument FORCE, reinstall an unchanged release."
             java-kit-jdtls-install-directory))))
     (if (and (not force) (equal installed version))
         (message "JDTLS %s is already installed" version)
-      (java-kit-install--install-jdtls-release release)
-      (message "Installed JDTLS %s; restart Eglot to use it" version))))
+      (java-kit-install--install-jdtls-release
+       release
+       (lambda (failure)
+         (if failure
+             (message "JDTLS installation failed: %s" failure)
+           (message "Installed JDTLS %s; restart Eglot to use it" version)))))))
 
 ;;;###autoload
 (defun java-kit-install-junit (&optional force)

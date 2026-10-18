@@ -1728,7 +1728,7 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
               ((symbol-function 'java-kit-install--read-version)
                (lambda (_file) "1.2.3"))
               ((symbol-function 'java-kit-install--install-jdtls-release)
-               (lambda (actual) (setq installed actual))))
+               (lambda (actual &optional _on-done) (setq installed actual))))
       (java-kit-install-jdtls)
       (should-not installed)
       (java-kit-install-jdtls t)
@@ -2099,6 +2099,108 @@ KEYS may hold a module `:dir' name and `java-kit-app--start-process' keys."
                :artifact "demo" :package "org.other.app")))
       (should (member "-DgroupId=com.example" command))
       (should (member "-Dpackage=org.other.app" command)))))
+
+(defmacro java-kit-test--with-http-server (directory url &rest body)
+  "Serve DIRECTORY over HTTP while running BODY with URL bound to its root."
+  (declare (indent 2))
+  `(let* ((port (+ 20000 (random 30000)))
+          (,url (format "http://127.0.0.1:%d" port))
+          (server (make-process
+                   :name "jk-http" :buffer nil :noquery t
+                   :command (list "python3" "-m" "http.server"
+                                  (number-to-string port)
+                                  "--bind" "127.0.0.1"
+                                  "--directory" ,directory))))
+     (unwind-protect
+         (progn
+           (should (java-kit-test--wait-for
+                    (lambda ()
+                      (ignore-errors
+                        (delete-process
+                         (open-network-stream "jk-probe" nil
+                                              "127.0.0.1" port))
+                        t))))
+           ,@body)
+       (delete-process server))))
+
+(defun java-kit-test--jdtls-release (served url checksum)
+  "Return a release plist for a tiny JDTLS archive in SERVED at URL.
+CHECKSUM, when non-nil, replaces the published SHA-256."
+  (let* ((staging (expand-file-name "stage" served))
+         (file "jdt-language-server-1.0.0-1.tar.gz")
+         (archive (expand-file-name file served)))
+    (java-kit-test--write-file (expand-file-name "bin/jdtls" staging) "#!/bin/sh\n")
+    (should (zerop (call-process "tar" nil nil nil "-czf" archive
+                                 "-C" staging "bin")))
+    (java-kit-test--write-file
+     (concat archive ".sha256")
+     (or checksum (java-kit-install--file-sha256 archive)))
+    (list :tool 'jdtls :version "1.0.0" :file file
+          :url (concat url "/" file)
+          :checksum-url (concat url "/" file ".sha256"))))
+
+(ert-deftest java-kit-test-jdtls-install-does-not-block-emacs ()
+  (skip-unless (and (executable-find "python3") (executable-find "tar")))
+  (java-kit-test--with-temp-directory root
+    (let* ((served (expand-file-name "served" root))
+           (java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+           (java-kit-install--jdtls-installing nil)
+           (outcome 'pending))
+      (make-directory served t)
+      (java-kit-test--with-http-server served url
+        (let ((release (java-kit-test--jdtls-release served url nil)))
+          (java-kit-install--install-jdtls-release
+           release (lambda (failure) (setq outcome failure)))
+          ;; The call returns before anything has been downloaded or installed.
+          (should (eq 'pending outcome))
+          (should java-kit-install--jdtls-installing)
+          (should-not (file-exists-p
+                       (expand-file-name "bin/jdtls"
+                                         java-kit-jdtls-install-directory)))
+          (should-error (java-kit-install--install-jdtls-release release)
+                        :type 'user-error)
+          (should (java-kit-test--wait-for (lambda () (not (eq 'pending outcome)))))
+          (should-not outcome)
+          (should-not java-kit-install--jdtls-installing)
+          (should (file-regular-p (expand-file-name
+                                   "bin/jdtls"
+                                   java-kit-jdtls-install-directory)))
+          (should (equal "1.0.0"
+                         (java-kit-install--read-version
+                          (java-kit-install--version-file
+                           java-kit-jdtls-install-directory))))
+          (should-not (directory-files root nil "\\`\\.jdtls-stage-")))))))
+
+(ert-deftest java-kit-test-jdtls-install-failure-keeps-the-installed-copy ()
+  (skip-unless (and (executable-find "python3") (executable-find "tar")))
+  (java-kit-test--with-temp-directory root
+    (let* ((served (expand-file-name "served" root))
+           (java-kit-jdtls-install-directory (expand-file-name "jdtls" root))
+           (java-kit-install--jdtls-installing nil)
+           (kept (java-kit-test--write-file
+                  (expand-file-name "bin/jdtls" java-kit-jdtls-install-directory)
+                  "old"))
+           (outcome 'pending))
+      (make-directory served t)
+      (java-kit-test--with-http-server served url
+        (dolist (case (list (cons "bad checksum" (make-string 64 ?0))
+                            (cons "missing archive" nil)))
+          (setq outcome 'pending)
+          (let ((release (java-kit-test--jdtls-release
+                          served url (cdr case))))
+            (when (equal (car case) "missing archive")
+              (setq release (plist-put release :url
+                                       (concat url "/absent.tar.gz"))))
+            (java-kit-install--install-jdtls-release
+             release (lambda (failure) (setq outcome failure)))
+            (should (java-kit-test--wait-for
+                     (lambda () (not (eq 'pending outcome)))))
+            (should (stringp outcome))
+            (should-not java-kit-install--jdtls-installing)
+            (should (equal "old" (with-temp-buffer
+                                   (insert-file-contents kept)
+                                   (buffer-string))))
+            (should-not (directory-files root nil "\\`\\.jdtls-stage-"))))))))
 
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
