@@ -2272,5 +2272,48 @@ CHECKSUM, when non-nil, replaces the published SHA-256."
                          (process-list))))
         (delete-process server)))))
 
+(defun java-kit-test--write-jar (file main-class)
+  "Write a JAR at FILE whose manifest declares MAIN-CLASS, when non-nil.
+A nil MAIN-CLASS gives a manifest without launcher; `none' omits the manifest."
+  (let ((staging (make-temp-file "jk-jar" t)))
+    (unwind-protect
+        (let ((default-directory staging))
+          (java-kit-test--write-file
+           (expand-file-name (if (eq main-class 'none)
+                                 "app.txt"
+                               "META-INF/MANIFEST.MF")
+                             staging)
+           (concat "Manifest-Version: 1.0\n"
+                   (and (stringp main-class)
+                        (format "Main-Class: %s\n" main-class))))
+          (should (zerop (call-process "zip" nil nil nil "-q" "-r" file
+                                       "."))))
+      (delete-directory staging t))))
+
+(ert-deftest java-kit-test-spring-boot-jar-is-chosen-by-launcher ()
+  (skip-unless (and (executable-find "zip") (executable-find "unzip")))
+  (java-kit-test--with-temp-directory root
+    (let ((target (expand-file-name "target" root))
+          (context (list :module-root root :build-system 'maven))
+          (time (current-time)))
+      (make-directory target t)
+      ;; Auxiliary jars are produced after the runnable one, so they are newer.
+      (cl-loop for (name . main) in '(("app-1.0.jar" . "JarLauncher")
+                                      ("app-1.0-sources.jar" . none)
+                                      ("app-1.0-tests.jar")
+                                      ("app-1.0-plain.jar" . "Main"))
+               for age from 0
+               do (let ((file (expand-file-name name target)))
+                    (java-kit-test--write-jar file main)
+                    (set-file-times file (time-add time age))))
+      (should (equal (expand-file-name "app-1.0.jar" target)
+                     (java-kit-app--spring-boot-jar context)))
+      ;; A custom final name that looks like an auxiliary jar is still chosen.
+      (delete-file (expand-file-name "app-1.0.jar" target))
+      (java-kit-test--write-jar (expand-file-name "service-tests.jar" target)
+                                "JarLauncher")
+      (should (equal (expand-file-name "service-tests.jar" target)
+                     (java-kit-app--spring-boot-jar context))))))
+
 (provide 'java-kit-test)
 ;;; java-kit-test.el ends here
